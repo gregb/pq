@@ -26,7 +26,7 @@ func openTestConn(t Fatalistic) *sql.DB {
 		os.Setenv("PGSSLMODE", "disable")
 	}
 
-	conn, err := sql.Open("postgres", "")
+	conn, err := sql.Open("postgres", "user=pqgotest dbname=pqgotest password=pqgotest sslmode=disable")
 	if err != nil {
 		t.Fatal(err)
 	}
