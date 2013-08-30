@@ -2,7 +2,6 @@ package pq
 
 import (
 	"fmt"
-	"github.com/lib/pq/oid"
 	"testing"
 	"time"
 )
@@ -164,169 +163,92 @@ func TestByteToText(t *testing.T) {
 	}
 }
 
-// Does not access database, simply tests the parser
-func Test_DecodeArrayString(t *testing.T) {
-
-	good := []string{
-		"{}",
-		"{1}",
-		"{1,2}",
-		"{1,2,3}",
-		"{A}",
-		"{A,B}",
-		"{\"A\"}",                                 // {A,B}
-		"{\"A\",B,\"\"}",                          // {"A",B,""}
-		"{\"A\",\"B\"}",                           // {"A","B"}
-		"{A,\"B\",\"Last word \\\"quoted\\\"\"}",  // {A,"B","Last word "quoted""}
-		"{\"A\",\"More, {special}; chars\\\\ \"}", // "{"A","More, {special}; chars\\ "}"
-	}
-
-	expected := [][]string{
-		{},
-		{"1"},
-		{"1", "2"},
-		{"1", "2", "3"},
-		{"A"},
-		{"A", "B"},
-		{"A"},
-		{"A", "B", ""},
-		{"A", "B"},
-		{"A", "B", "Last word \"quoted\""},
-		{"A", "More, {special}; chars\\ "},
-	}
-
-	for testNum, input := range good {
-		iface, err := decodeArray([]byte(input), oid.T__varchar)
-
-		if err != nil {
-			t.Error(err)
-		}
-
-		results := iface.([]string) // we know this because we passed in oid.T__varchar
-
-		if len(results) != len(expected[testNum]) {
-			t.Errorf("For input <%s>, expected length %d, got %d <%v>", input, len(expected[testNum]), len(results), results)
-
-		} else {
-
-			for elementNum, resultBytes := range results {
-				result := string(resultBytes)
-				ex := expected[testNum][elementNum]
-				if result != ex {
-					t.Errorf("For input <%s> element %d, expected <%v>, got <%v>", input, elementNum, ex, result)
-				}
-
-			}
-		}
-	}
-}
-
-func Test_DecodeVarcharArrayFromDb(t *testing.T) {
+func TestStringWithQuotes(t *testing.T) {
 	db := openTestConn(t)
 	defer db.Close()
 
-	expectedArray := []string{"", "A", "B", `"C" quoted, with whitespace and delimiters`}
-	gotArray := make([]string, 0)
-
-	q := `SELECT '{"",A,"B","\"C\" quoted, with whitespace and delimiters"}'::varchar[]`
-	row, err := db.Query(q)
+	helloWorld := string(`hello "world"`)
+	row, err := db.Query("SELECT $1::varchar", &helloWorld)
 
 	if err != nil {
-		t.Fatal(err)
+		t.Error(err)
 	}
 
-	if !row.Next() {
+	n := row.Next()
+
+	if n != true {
 		t.Fatal("Expected at least one row")
 	}
 
-	err = row.Scan(&gotArray)
+	var gotString string
+
+	err = row.Scan(&gotString)
 
 	if err != nil {
-		t.Fatal(err)
+		t.Error(err)
 	}
 
-	if len(gotArray) != len(expectedArray) {
-		t.Errorf("Expected %d array elements, got %d", len(expectedArray), len(gotArray))
-	}
-
-	for i, v := range gotArray {
-		if v != expectedArray[i] {
-			t.Errorf("Error in element %d; expected %s, got %s", i, expectedArray[i], v)
-		}
-	}
-
-}
-
-func Test_DecodeInt64ArrayFromDb(t *testing.T) {
-	db := openTestConn(t)
-	defer db.Close()
-
-	expectedArray := []int64{1, 2, 3}
-	gotArray := make([]int64, 0)
-
-	q := `SELECT '{1,2,3}'::bigint[]`
-	row, err := db.Query(q)
-
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if !row.Next() {
-		t.Fatal("Expected at least one row")
-	}
-
-	err = row.Scan(&gotArray)
-
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if len(gotArray) != len(expectedArray) {
-		t.Errorf("Expected %d array elements, got %d", len(expectedArray), len(gotArray))
-	}
-
-	for i, v := range gotArray {
-		if v != expectedArray[i] {
-			t.Errorf("Error in element %d; expected %d, got %d", i, expectedArray[i], v)
-		}
+	if gotString != helloWorld {
+		t.Errorf("Expected %s, got %s", helloWorld, gotString)
 	}
 }
 
-func Test_ArrayRoundtrip(t *testing.T) {
+func TestStringEmpty(t *testing.T) {
 	db := openTestConn(t)
 	defer db.Close()
 
-	expectedArray := []string{
-		"NULL",
-		"",
-		"A",
-		"\"B quoted\"",
-		"C, with commas",
-	}
-	gotArray := make([]string, 0)
-
-	row, err := db.Query("SELECT $1::varchar[]", &expectedArray)
+	helloWorld := string("")
+	row, err := db.Query("SELECT $1::varchar", &helloWorld)
 
 	if err != nil {
-		t.Fatal(err)
+		t.Error(err)
 	}
 
-	if !row.Next() {
+	n := row.Next()
+
+	if n != true {
 		t.Fatal("Expected at least one row")
 	}
-	err = row.Scan(&gotArray)
+
+	var gotString string
+
+	err = row.Scan(&gotString)
 
 	if err != nil {
-		t.Fatal(err)
+		t.Error(err)
 	}
 
-	if len(gotArray) != len(expectedArray) {
-		t.Errorf("Expected %d array elements, got %d", len(expectedArray), len(gotArray))
+	if gotString != helloWorld {
+		t.Errorf("Expected %s, got %s", helloWorld, gotString)
+	}
+}
+
+func TestStringNULL(t *testing.T) {
+	db := openTestConn(t)
+	defer db.Close()
+
+	helloWorld := string("NULL")
+	row, err := db.Query("SELECT $1::varchar", &helloWorld)
+
+	if err != nil {
+		t.Error(err)
 	}
 
-	for i, v := range gotArray {
-		if v != expectedArray[i] {
-			t.Errorf("Error in element %d; expected %d, got %d", i, expectedArray[i], v)
-		}
+	n := row.Next()
+
+	if n != true {
+		t.Fatal("Expected at least one row")
+	}
+
+	var gotString string
+
+	err = row.Scan(&gotString)
+
+	if err != nil {
+		t.Error(err)
+	}
+
+	if gotString != helloWorld {
+		t.Errorf("Expected %s, got %s", helloWorld, gotString)
 	}
 }

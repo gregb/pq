@@ -4,9 +4,8 @@ import (
 	"database/sql/driver"
 	"encoding/hex"
 	"fmt"
-	"github.com/lib/pq/oid"
+	"github.com/gregb/pq/oid"
 	"log"
-	"reflect"
 	"strconv"
 	"time"
 )
@@ -44,17 +43,6 @@ func encode(x interface{}, typ oid.Oid) []byte {
 		return encoded
 	}
 
-	if oid.IsArray(typ) {
-		log.Printf("Encoding slice of oid %d", typ)
-		encoded, err := encodeArray(x)
-
-		if err != nil {
-			panic(err)
-		}
-
-		return encoded
-	}
-
 	switch v := x.(type) {
 	case int64:
 		return []byte(fmt.Sprintf("%d", v))
@@ -85,7 +73,7 @@ func encode(x interface{}, typ oid.Oid) []byte {
 
 func decode(s []byte, typ oid.Oid) interface{} {
 
-	log.Printf("Attempting to decode oid %d, value = <%s>", typ, string(s))
+	//log.Printf("Attempting to decode oid %d, value = <%s>", typ, string(s))
 	// prefer explicitly registered codecs over built ins
 	decoder, ok := customDecoders[typ]
 	if ok {
@@ -98,8 +86,10 @@ func decode(s []byte, typ oid.Oid) interface{} {
 		return decoded
 	}
 
-	if oid.IsArray(typ) {
-		slice, err := decodeArray(s, typ)
+	if typ.IsArray() {
+		// TODO: Cache by oid?  Creating the same thing all the time could be slow
+		arrayConverter := &arrayConverter{ArrayTyp: typ}
+		slice, err := arrayConverter.decode(s)
 
 		if err != nil {
 			panic(err)
@@ -145,9 +135,9 @@ func decode(s []byte, typ oid.Oid) interface{} {
 			errorf("%s", err)
 		}
 		return f
+	case oid.T_point, oid.T_lseg, oid.T_line, oid.T_box, oid.T_circle, oid.T_path, oid.T_polygon:
 		// Geometry types get turned into a []float64, for
 		// further sql.Scan()-ing into the type of the user's choice
-	case oid.T_point, oid.T_lseg, oid.T_line, oid.T_box, oid.T_circle, oid.T_path, oid.T_polygon:
 		floats, err := extractFloats(s)
 		if err != nil {
 			errorf("%s", err)
@@ -161,151 +151,6 @@ func decode(s []byte, typ oid.Oid) interface{} {
 	log.Printf("Leaving OID %d, value = %v as a []byte", typ, s)
 
 	return s
-}
-
-// Parses arrays retuned from postgres according to the docs at
-// http://www.postgresql.org/docs/9.2/static/arrays.html#ARRAYS-IO
-func decodeArray(s []byte, typ oid.Oid) (interface{}, error) {
-
-	//log.Printf("------------ Decoding array <%s>", string(s))
-
-	// Arrays can be null
-	if s == nil {
-		return nil, nil
-	}
-
-	length := len(s)
-
-	// If there's anything, there should at least be empty braces: {}
-	if length < 2 {
-		return nil, fmt.Errorf("Malformed array string: %s", s)
-	}
-
-	if s[0] != '{' {
-		return nil, fmt.Errorf("Malformed array string: Should start with '{', but found %s instead", s[0])
-	}
-
-	if s[length-1] != '}' {
-		return nil, fmt.Errorf("Malformed array string: Should end with '}', but found %s instead", s[length-1])
-	}
-
-	// get the element type for this array type, and it's delimiter
-	elementTyp := oid.ElementType[typ]
-	delimiter := oid.GetArrayElementDelimiter(elementTyp)
-	//log.Printf("Element type: %d, delimiter = %s", elementTyp, string(delimiter))
-
-	// states for the decoder
-	const (
-		ready = iota
-		backslash
-		q_opened
-		done
-	)
-
-	state := ready
-	strings := make([][]byte, 0, 0)
-	current := make([]byte, 0, 0)
-
-	// loop through all chars except just-tested braces
-	for i := 0; i < length; i++ {
-		c := s[i]
-		//log.Printf("current = <%s>, c = <%s>", string(current), string(c))
-
-		switch state {
-		case ready:
-			switch c {
-			case '{':
-				// array opener.  do nothing (for now)
-				// TODO: Array of arrays?  Maybe recurse here.
-			case ' ':
-				// whitespace outside of a quoted string shouldn't happen
-				// ... but just ignore it if it does
-			case '"':
-				// starting a quoted element
-				// throw the quote away, but remember we are quoted
-				state = q_opened
-			case '}':
-				// array closer -- end of elements
-
-				// TODO: Find a better way...?
-				if length > 2 {
-					// avoids adding an element if the empty array is present
-					strings = append(strings, current)
-				}
-
-				//log.Printf("Done with element <%s>. Strings = %v", string(current), strings)
-				//log.Printf("Done with array")
-				current = make([]byte, 0, 0)
-				state = done
-			case delimiter:
-				// an element just ended. record it
-				strings = append(strings, current)
-
-				//log.Printf("Done with element <%s>. Strings = %v", string(current), strings)
-				current = make([]byte, 0, 0)
-				state = ready
-			default:
-				// any other char is the part of a non-quoted element; include it
-				current = append(current, c)
-			}
-		case backslash:
-			// the last character was a backslash;
-			// perhaps do something interesting with this character
-			switch c {
-			case '"', '\\':
-				// if this is a special char, insert just the special char
-				current = append(current, c)
-				state = q_opened
-			default:
-				// otherwise insert both the backslash and the char
-				current = append(current, '\\', c)
-				state = q_opened
-			}
-		case q_opened:
-			// a quote was opened, but not yet closed
-			// delimiters and brackets not treated specially, but escape sequences are
-			switch c {
-			case '\\':
-				//handle the next character specially depending on what it is
-				state = backslash
-			case '"':
-				// the end quote
-				state = ready
-			default:
-				// anything that's not escaped, or not an end quote is part of the element
-				current = append(current, c)
-			}
-		case done:
-			panic("You should not reach done state before the end of the string")
-		}
-	}
-
-	// determine the Go type of elements
-	goElementType := oid.GetGoType(elementTyp)
-	//log.Printf("Element type is %v", goElementType)
-
-	// then make a slice of that
-	sliceType := reflect.SliceOf(goElementType)
-	elements := reflect.MakeSlice(sliceType, 0, len(strings))
-	//log.Printf("Made slice: %v", elements)
-
-	// and populate it
-	for _, v := range strings {
-		// decode individually
-		element := decode(v, elementTyp)
-		//log.Printf("Decoded %s into %v", string(v), element)
-
-		// and add to the slice
-		elements = reflect.Append(elements, reflect.ValueOf(element))
-	}
-
-	return elements.Interface(), nil
-}
-
-func encodeArray(slice interface{}) ([]byte, error) {
-
-	log.Printf("Encoding as array: %v", slice)
-	return nil, nil
 }
 
 func mustParse(f string, typ oid.Oid, s []byte) time.Time {

@@ -194,12 +194,12 @@ const (
 )
 
 var ArrayType = make(map[Oid]Oid)
-var ElementType = make(map[Oid]Oid)
+var elementType = make(map[Oid]Oid)
 var category = make(map[Oid]Category)
 var goTypes = make(map[Oid]reflect.Type)
 
-// this could be done with a query too, but fudge it for now
-func GetArrayElementDelimiter(typ Oid) byte {
+// GetArrayElementDelimiter gets the delimiter between array elements for the element type.
+func (typ Oid) Delimiter() byte {
 	if typ == T_box {
 		return ';'
 	}
@@ -207,11 +207,19 @@ func GetArrayElementDelimiter(typ Oid) byte {
 	return ','
 }
 
-func IsArray(typ Oid) bool {
+func (typ Oid) IsArray() bool {
 	return category[typ] == C_array
 }
 
-func GetGoType(typ Oid) reflect.Type {
+func (typ Oid) Category() Category {
+	return category[typ]
+}
+
+func (typ Oid) ElementType() Oid {
+	return elementType[typ]
+}
+
+func  (typ Oid) GoType() reflect.Type {
 	t, ok := goTypes[typ]
 
 	if ok {
@@ -310,79 +318,79 @@ func init() {
 
 
 	// insert results of 3rd query here
-	ElementType[T_name] = T_char
-	ElementType[T_int2vector] = T_int2
-	ElementType[T_oidvector] = T_oid
-	ElementType[T__xml] = T_xml
-	ElementType[T__json] = T_json
-	ElementType[T_point] = T_float8
-	ElementType[T_lseg] = T_point
-	ElementType[T_box] = T_point
-	ElementType[T_line] = T_float8
-	ElementType[T__line] = T_line
-	ElementType[T__cidr] = T_cidr
-	ElementType[T__circle] = T_circle
-	ElementType[T__money] = T_money
-	ElementType[T__bool] = T_bool
-	ElementType[T__bytea] = T_bytea
-	ElementType[T__char] = T_char
-	ElementType[T__name] = T_name
-	ElementType[T__int2] = T_int2
-	ElementType[T__int2vector] = T_int2vector
-	ElementType[T__int4] = T_int4
-	ElementType[T__regproc] = T_regproc
-	ElementType[T__text] = T_text
-	ElementType[T__tid] = T_tid
-	ElementType[T__xid] = T_xid
-	ElementType[T__cid] = T_cid
-	ElementType[T__oidvector] = T_oidvector
-	ElementType[T__bpchar] = T_bpchar
-	ElementType[T__varchar] = T_varchar
-	ElementType[T__int8] = T_int8
-	ElementType[T__point] = T_point
-	ElementType[T__lseg] = T_lseg
-	ElementType[T__path] = T_path
-	ElementType[T__box] = T_box
-	ElementType[T__float4] = T_float4
-	ElementType[T__float8] = T_float8
-	ElementType[T__abstime] = T_abstime
-	ElementType[T__reltime] = T_reltime
-	ElementType[T__tinterval] = T_tinterval
-	ElementType[T__polygon] = T_polygon
-	ElementType[T__oid] = T_oid
-	ElementType[T__aclitem] = T_aclitem
-	ElementType[T__macaddr] = T_macaddr
-	ElementType[T__inet] = T_inet
-	ElementType[T__timestamp] = T_timestamp
-	ElementType[T__date] = T_date
-	ElementType[T__time] = T_time
-	ElementType[T__timestamptz] = T_timestamptz
-	ElementType[T__interval] = T_interval
-	ElementType[T__numeric] = T_numeric
-	ElementType[T__cstring] = T_cstring
-	ElementType[T__timetz] = T_timetz
-	ElementType[T__bit] = T_bit
-	ElementType[T__varbit] = T_varbit
-	ElementType[T__refcursor] = T_refcursor
-	ElementType[T__regprocedure] = T_regprocedure
-	ElementType[T__regoper] = T_regoper
-	ElementType[T__regoperator] = T_regoperator
-	ElementType[T__regclass] = T_regclass
-	ElementType[T__regtype] = T_regtype
-	ElementType[T__record] = T_record
-	ElementType[T__txid_snapshot] = T_txid_snapshot
-	ElementType[T__uuid] = T_uuid
-	ElementType[T__tsvector] = T_tsvector
-	ElementType[T__gtsvector] = T_gtsvector
-	ElementType[T__tsquery] = T_tsquery
-	ElementType[T__regconfig] = T_regconfig
-	ElementType[T__regdictionary] = T_regdictionary
-	ElementType[T__int4range] = T_int4range
-	ElementType[T__numrange] = T_numrange
-	ElementType[T__tsrange] = T_tsrange
-	ElementType[T__tstzrange] = T_tstzrange
-	ElementType[T__daterange] = T_daterange
-	ElementType[T__int8range] = T_int8range
+	elementType[T_name] = T_char
+	elementType[T_int2vector] = T_int2
+	elementType[T_oidvector] = T_oid
+	elementType[T__xml] = T_xml
+	elementType[T__json] = T_json
+	elementType[T_point] = T_float8
+	elementType[T_lseg] = T_point
+	elementType[T_box] = T_point
+	elementType[T_line] = T_float8
+	elementType[T__line] = T_line
+	elementType[T__cidr] = T_cidr
+	elementType[T__circle] = T_circle
+	elementType[T__money] = T_money
+	elementType[T__bool] = T_bool
+	elementType[T__bytea] = T_bytea
+	elementType[T__char] = T_char
+	elementType[T__name] = T_name
+	elementType[T__int2] = T_int2
+	elementType[T__int2vector] = T_int2vector
+	elementType[T__int4] = T_int4
+	elementType[T__regproc] = T_regproc
+	elementType[T__text] = T_text
+	elementType[T__tid] = T_tid
+	elementType[T__xid] = T_xid
+	elementType[T__cid] = T_cid
+	elementType[T__oidvector] = T_oidvector
+	elementType[T__bpchar] = T_bpchar
+	elementType[T__varchar] = T_varchar
+	elementType[T__int8] = T_int8
+	elementType[T__point] = T_point
+	elementType[T__lseg] = T_lseg
+	elementType[T__path] = T_path
+	elementType[T__box] = T_box
+	elementType[T__float4] = T_float4
+	elementType[T__float8] = T_float8
+	elementType[T__abstime] = T_abstime
+	elementType[T__reltime] = T_reltime
+	elementType[T__tinterval] = T_tinterval
+	elementType[T__polygon] = T_polygon
+	elementType[T__oid] = T_oid
+	elementType[T__aclitem] = T_aclitem
+	elementType[T__macaddr] = T_macaddr
+	elementType[T__inet] = T_inet
+	elementType[T__timestamp] = T_timestamp
+	elementType[T__date] = T_date
+	elementType[T__time] = T_time
+	elementType[T__timestamptz] = T_timestamptz
+	elementType[T__interval] = T_interval
+	elementType[T__numeric] = T_numeric
+	elementType[T__cstring] = T_cstring
+	elementType[T__timetz] = T_timetz
+	elementType[T__bit] = T_bit
+	elementType[T__varbit] = T_varbit
+	elementType[T__refcursor] = T_refcursor
+	elementType[T__regprocedure] = T_regprocedure
+	elementType[T__regoper] = T_regoper
+	elementType[T__regoperator] = T_regoperator
+	elementType[T__regclass] = T_regclass
+	elementType[T__regtype] = T_regtype
+	elementType[T__record] = T_record
+	elementType[T__txid_snapshot] = T_txid_snapshot
+	elementType[T__uuid] = T_uuid
+	elementType[T__tsvector] = T_tsvector
+	elementType[T__gtsvector] = T_gtsvector
+	elementType[T__tsquery] = T_tsquery
+	elementType[T__regconfig] = T_regconfig
+	elementType[T__regdictionary] = T_regdictionary
+	elementType[T__int4range] = T_int4range
+	elementType[T__numrange] = T_numrange
+	elementType[T__tsrange] = T_tsrange
+	elementType[T__tstzrange] = T_tstzrange
+	elementType[T__daterange] = T_daterange
+	elementType[T__int8range] = T_int8range
 
 
 	// results of the 4th query go here

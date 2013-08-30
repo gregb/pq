@@ -10,7 +10,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/lib/pq/oid"
+	"github.com/gregb/pq/oid"
 	"io"
 	"net"
 	"os"
@@ -426,6 +426,20 @@ type stmt struct {
 	closed    bool
 }
 
+// ColumnConverter returns a ValueConverter for the provided
+// column index.  If the type of a specific column isn't known
+// or shouldn't be handled specially, DefaultValueConverter
+// can be returned.
+func (st *stmt) ColumnConverter(idx int) driver.ValueConverter {
+	paramTyp := st.paramTyps[idx]
+
+	if paramTyp.IsArray() {
+		return &arrayConverter{ArrayTyp: paramTyp}
+	}
+
+	return driver.DefaultParameterConverter
+}
+
 func (st *stmt) Close() (err error) {
 	if st.closed {
 		return nil
@@ -652,8 +666,8 @@ func parseEnviron(env []string) (out map[string]string) {
 			accrue("user")
 		case "PGPASSWORD":
 			accrue("password")
-		// skip PGPASSFILE, PGSERVICE, PGSERVICEFILE,
-		// PGREALM
+			// skip PGPASSFILE, PGSERVICE, PGSERVICEFILE,
+			// PGREALM
 		case "PGOPTIONS":
 			accrue("options")
 		case "PGAPPNAME":
