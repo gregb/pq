@@ -252,3 +252,62 @@ func TestStringNULL(t *testing.T) {
 		t.Errorf("Expected %s, got %s", helloWorld, gotString)
 	}
 }
+
+func Test_GeometryToFloats(t *testing.T) {
+	db := openTestConn(t)
+	defer db.Close()
+
+	expectedPoint := []float64{2, -3}
+	expectedSegment := []float64{-3e4, 42, 0, 0}
+	expectedCircle := []float64{1.2, -3.4, 5.6}
+
+	row, err := db.Query("SELECT '(2.0, -3)'::point as p, '[(-3e4,42),(0,0)]'::lseg as s, '<(1.2,-3.4),5.6>'::circle as c")
+
+	if err != nil {
+		t.Error(err)
+	}
+
+	n := row.Next()
+
+	if n != true {
+		t.Fatal("Expected at least one row")
+	}
+
+	var gotPoint, gotSegment, gotCircle []float64
+
+	err = row.Scan(&gotPoint, &gotSegment, &gotCircle)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(gotPoint) != len(expectedPoint) {
+		t.Fatalf("Expected %d floats from scanned point, but got %d", len(expectedPoint), len(gotPoint))
+	}
+
+	if len(gotSegment) != len(expectedSegment) {
+		t.Fatalf("Expected %d floats from scanned point, but got %d", len(expectedSegment), len(gotSegment))
+	}
+
+	if len(gotCircle) != len(expectedCircle) {
+		t.Fatalf("Expected %d floats from scanned point, but got %d", len(expectedCircle), len(gotCircle))
+	}
+
+	for i, v := range gotPoint {
+		if v != expectedPoint[i] {
+			t.Errorf("Error in point element %d; expected %f, got %f", i, expectedPoint[i], v)
+		}
+	}
+
+	for i, v := range gotSegment {
+		if v != expectedSegment[i] {
+			t.Errorf("Error in lseg element %d; expected %f, got %f", i, expectedSegment[i], v)
+		}
+	}
+
+	for i, v := range gotCircle {
+		if v != expectedCircle[i] {
+			t.Errorf("Error in circle element %d; expected %f, got %f", i, expectedCircle[i], v)
+		}
+	}
+}

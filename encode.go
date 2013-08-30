@@ -206,8 +206,8 @@ func extractFloats(s []byte) ([]float64, error) {
 
 	for i, b := range s {
 
-		// Float parts are 0 to 9, and the decimal place
-		isFloatPart := (b == '.') || (b >= '0' && b <= '9')
+		// Float parts are 0 to 9, signs, and the decimal place
+		isFloatPart := (b == '.') || (b == '+') || (b == '-') || (b >= '0' && b <= '9')
 
 		if isFloatPart && !inFloat {
 			// This char is the beginning of a float, mark it
