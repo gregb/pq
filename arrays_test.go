@@ -220,7 +220,12 @@ func Test_FloatArrayRoundtrip(t *testing.T) {
 	defer db.Close()
 
 	expectedArray := []float64{
-		0.1, -2, 3.1415927, 36e10, 0.0000000000001,
+		1.1,               // simple
+		-2,                // negative
+		3.1415927,         // pi!
+		123456789e10,      // scientific
+		0.000000000000001, // smallest possible value that can be parsed in a float64
+		999999999999999,   // largest parseable float64
 	}
 
 	row, err := db.Query("SELECT $1::float8[] as testColName", &expectedArray)
@@ -246,7 +251,7 @@ func Test_FloatArrayRoundtrip(t *testing.T) {
 
 	for i, v := range gotArray {
 		if v != expectedArray[i] {
-			t.Errorf("Error in element %d; expected %d, got %d", i, expectedArray[i], v)
+			t.Errorf("Error in element %d; expected %f, got %f", i, expectedArray[i], v)
 		}
 	}
 }

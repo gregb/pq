@@ -46,19 +46,19 @@ func encode(x interface{}, typ oid.Oid) []byte {
 	switch v := x.(type) {
 	case int64:
 		return []byte(fmt.Sprintf("%d", v))
-	case float32, float64:
+	case float32:
 		return []byte(fmt.Sprintf("%f", v))
+	case float64:
+		return []byte(fmt.Sprintf("%g", v))
 	case []byte:
 		if typ == oid.T_bytea {
 			return []byte(fmt.Sprintf("\\x%x", v))
 		}
-
 		return v
 	case string:
 		if typ == oid.T_bytea {
 			return []byte(fmt.Sprintf("\\x%x", v))
 		}
-
 		return []byte(v)
 	case bool:
 		return []byte(fmt.Sprintf("%t", v))
