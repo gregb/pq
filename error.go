@@ -48,7 +48,7 @@ func (err *pgError) Fatal() bool {
 func (err *pgError) Error() string {
 	var s string
 	for k, v := range err.c {
-		s += fmt.Sprintf(" %c:%q", k, v)
+		s += fmt.Sprintf(" %c:%s", k, v)
 	}
 	return "pq: " + s[1:]
 }

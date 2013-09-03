@@ -19,6 +19,40 @@ import (
 	"strings"
 )
 
+// message codes from http://www.postgresql.org/docs/9.2/static/protocol-message-formats.html
+type backendMessage byte
+type frontendMessage byte
+
+const (
+	// backend messages.  received from server
+	m_commandComplete      backendMessage = 'C'
+	m_dataRow              backendMessage = 'D'
+	m_error                backendMessage = 'E'
+	m_keyData              backendMessage = 'K'
+	m_authenticate         backendMessage = 'R'
+	m_parameterStatus      backendMessage = 'S'
+	m_rowDescription       backendMessage = 'T'
+	m_parameterDescription backendMessage = 't'
+	m_noData               backendMessage = 'n'
+	m_notice               backendMessage = 'N'
+	m_readyForQuery        backendMessage = 'Z'
+	m_parseComplete        backendMessage = '1'
+	m_bindComplete         backendMessage = '2'
+	m_closeComplete        backendMessage = '3'
+)
+
+const (
+	// frontend messages.  sent to server
+	m_close     frontendMessage = 'C'
+	m_describe  frontendMessage = 'D'
+	m_execute   frontendMessage = 'E'
+	m_parse     frontendMessage = 'P'
+	m_password  frontendMessage = 'p'
+	m_query     frontendMessage = 'Q'
+	m_sync      frontendMessage = 'S'
+	m_terminate frontendMessage = 'X'
+)
+
 var (
 	ErrSSLNotSupported = errors.New("pq: SSL is not enabled on the server")
 	ErrNotSupported    = errors.New("pq: invalid command")
@@ -39,6 +73,12 @@ type conn struct {
 	buf     *bufio.Reader
 	namei   int
 	scratch [512]byte
+}
+
+func (c *conn) writeMessageType(b frontendMessage) *writeBuf {
+	c.scratch[0] = byte(b)
+	w := writeBuf(c.scratch[:5])
+	return &w
 }
 
 func (c *conn) writeBuf(b byte) *writeBuf {
@@ -155,22 +195,32 @@ func (cn *conn) gname() string {
 func (cn *conn) simpleQuery(q string) (res driver.Result, err error) {
 	defer errRecover(&err)
 
-	b := cn.writeBuf('Q')
+	b := cn.writeMessageType(m_query)
 	b.string(q)
 	cn.send(b)
+
+	// just reusing it's slice members because we're doing the same thing stmt is doing
+	resultDataHolder := &stmt{}
 
 	for {
 		t, r := cn.recv1()
 		switch t {
-		case 'C':
-			res = parseComplete(r.string())
-		case 'Z':
+		case m_commandComplete:
+			count := parseComplete(r.string())
+			res = createResult(count, resultDataHolder.execData)
+		case m_readyForQuery:
 			// done
 			return
-		case 'E':
+		case m_error:
 			err = parseError(r)
-		case 'T', 'N', 'S', 'D':
+		case m_notice, m_parameterStatus:
 			// ignore
+		case m_rowDescription:
+			resultDataHolder.parseRowDesciption(r)
+		case m_dataRow:
+			l := len(resultDataHolder.cols)
+			resultDataHolder.execData = make([]driver.Value, l, l)
+			resultDataHolder.parseDataRow(r, resultDataHolder.execData)
 		default:
 			errorf("unknown response for simple query: %q", t)
 		}
@@ -183,47 +233,39 @@ func (cn *conn) prepareTo(q, stmtName string) (_ driver.Stmt, err error) {
 
 	st := &stmt{cn: cn, name: stmtName, query: q}
 
-	b := cn.writeBuf('P')
+	b := cn.writeMessageType(m_parse)
 	b.string(st.name)
 	b.string(q)
 	b.int16(0)
 	cn.send(b)
 
-	b = cn.writeBuf('D')
-	b.byte('S')
+	b = cn.writeMessageType(m_describe)
+	b.byte('S') // statement
 	b.string(st.name)
 	cn.send(b)
 
-	cn.send(cn.writeBuf('S'))
+	cn.send(cn.writeMessageType(m_sync))
 
 	for {
 		t, r := cn.recv1()
 		switch t {
-		case '1', '2', 'N':
-		case 't':
+		case m_parseComplete, m_bindComplete, m_notice:
+		case m_parameterDescription:
 			nparams := int(r.int16())
 			st.paramTyps = make([]oid.Oid, nparams)
 
 			for i := range st.paramTyps {
 				st.paramTyps[i] = r.oid()
 			}
-		case 'T':
-			n := r.int16()
-			st.cols = make([]string, n)
-			st.rowTyps = make([]oid.Oid, n)
-			for i := range st.cols {
-				st.cols[i] = r.string()
-				r.next(6)
-				st.rowTyps[i] = r.oid()
-				r.next(8)
-			}
-		case 'n':
+		case m_rowDescription:
+			st.parseRowDesciption(r)
+		case m_noData:
 			// no data
-		case 'Z':
+		case m_readyForQuery:
 			return st, err
-		case 'E':
+		case m_error:
 			err = parseError(r)
-		case 'C':
+		case m_commandComplete:
 			// command complete
 			return st, err
 		default:
@@ -240,7 +282,7 @@ func (cn *conn) Prepare(q string) (driver.Stmt, error) {
 
 func (cn *conn) Close() (err error) {
 	defer errRecover(&err)
-	cn.send(cn.writeBuf('X'))
+	cn.send(cn.writeMessageType(m_terminate))
 
 	return cn.c.Close()
 }
@@ -286,13 +328,13 @@ func (cn *conn) send(m *writeBuf) {
 	}
 }
 
-func (cn *conn) recv() (t byte, r *readBuf) {
+func (cn *conn) recv() (t backendMessage, r *readBuf) {
 	for {
 		t, r = cn.recv1()
 		switch t {
-		case 'E':
+		case m_error:
 			panic(parseError(r))
-		case 'N':
+		case m_notice:
 			// ignore
 		default:
 			return
@@ -302,13 +344,13 @@ func (cn *conn) recv() (t byte, r *readBuf) {
 	panic("not reached")
 }
 
-func (cn *conn) recv1() (byte, *readBuf) {
+func (cn *conn) recv1() (backendMessage, *readBuf) {
 	x := cn.scratch[:5]
 	_, err := io.ReadFull(cn.buf, x)
 	if err != nil {
 		panic(err)
 	}
-	c := x[0]
+	c := backendMessage(x[0])
 
 	b := readBuf(x[1:])
 	n := b.int32() - 4
@@ -369,10 +411,10 @@ func (cn *conn) startup(o Values) {
 	for {
 		t, r := cn.recv()
 		switch t {
-		case 'K', 'S':
-		case 'R':
+		case m_keyData, 'S':
+		case m_authenticate:
 			cn.auth(r, o)
-		case 'Z':
+		case m_readyForQuery:
 			return
 		default:
 			errorf("unknown response for startup: %q", t)
@@ -385,12 +427,12 @@ func (cn *conn) auth(r *readBuf, o Values) {
 	case 0:
 		// OK
 	case 3:
-		w := cn.writeBuf('p')
+		w := cn.writeMessageType(m_password)
 		w.string(o.Get("password"))
 		cn.send(w)
 
 		t, r := cn.recv()
-		if t != 'R' {
+		if t != m_authenticate {
 			errorf("unexpected password response: %q", t)
 		}
 
@@ -399,12 +441,12 @@ func (cn *conn) auth(r *readBuf, o Values) {
 		}
 	case 5:
 		s := string(r.next(4))
-		w := cn.writeBuf('p')
+		w := cn.writeMessageType(m_password)
 		w.string("md5" + md5s(md5s(o.Get("password")+o.Get("user"))+s))
 		cn.send(w)
 
 		t, r := cn.recv()
-		if t != 'R' {
+		if t != m_authenticate {
 			errorf("unexpected password response: %q", t)
 		}
 
@@ -414,216 +456,6 @@ func (cn *conn) auth(r *readBuf, o Values) {
 	default:
 		errorf("unknown authentication response: %d", code)
 	}
-}
-
-type stmt struct {
-	cn        *conn
-	name      string
-	query     string
-	cols      []string
-	rowTyps   []oid.Oid
-	paramTyps []oid.Oid
-	closed    bool
-}
-
-// ColumnConverter returns a ValueConverter for the provided
-// column index.  If the type of a specific column isn't known
-// or shouldn't be handled specially, DefaultValueConverter
-// can be returned.
-func (st *stmt) ColumnConverter(idx int) driver.ValueConverter {
-	paramTyp := st.paramTyps[idx]
-
-	if paramTyp.IsArray() {
-		return &arrayConverter{ArrayTyp: paramTyp}
-	}
-
-	return driver.DefaultParameterConverter
-}
-
-func (st *stmt) Close() (err error) {
-	if st.closed {
-		return nil
-	}
-
-	defer errRecover(&err)
-
-	w := st.cn.writeBuf('C')
-	w.byte('S')
-	w.string(st.name)
-	st.cn.send(w)
-
-	st.cn.send(st.cn.writeBuf('S'))
-
-	t, _ := st.cn.recv()
-	if t != '3' {
-		errorf("unexpected close response: %q", t)
-	}
-	st.closed = true
-
-	t, _ = st.cn.recv()
-	if t != 'Z' {
-		errorf("expected ready for query, but got: %q", t)
-	}
-
-	return nil
-}
-
-func (st *stmt) Query(v []driver.Value) (_ driver.Rows, err error) {
-	defer errRecover(&err)
-	st.exec(v)
-	return &rows{st: st}, nil
-}
-
-func (st *stmt) Exec(v []driver.Value) (res driver.Result, err error) {
-	defer errRecover(&err)
-
-	if len(v) == 0 {
-		return st.cn.simpleQuery(st.query)
-	}
-	st.exec(v)
-
-	for {
-		t, r := st.cn.recv1()
-		switch t {
-		case 'E':
-			err = parseError(r)
-		case 'C':
-			res = parseComplete(r.string())
-		case 'Z':
-			// done
-			return
-		case 'T', 'N', 'S', 'D':
-			// Ignore
-		default:
-			errorf("unknown exec response: %q", t)
-		}
-	}
-
-	panic("not reached")
-}
-
-func (st *stmt) exec(v []driver.Value) {
-	w := st.cn.writeBuf('B')
-	w.string("")
-	w.string(st.name)
-	w.int16(0)
-	w.int16(len(v))
-	for i, x := range v {
-		if x == nil {
-			w.int32(-1)
-		} else {
-			b := encode(x, st.paramTyps[i])
-			w.int32(len(b))
-			w.bytes(b)
-		}
-	}
-	w.int16(0)
-	st.cn.send(w)
-
-	w = st.cn.writeBuf('E')
-	w.string("")
-	w.int32(0)
-	st.cn.send(w)
-
-	st.cn.send(st.cn.writeBuf('S'))
-
-	var err error
-	for {
-		t, r := st.cn.recv1()
-		switch t {
-		case 'E':
-			err = parseError(r)
-		case '2':
-			if err != nil {
-				panic(err)
-			}
-			return
-		case 'Z':
-			if err != nil {
-				panic(err)
-			}
-			return
-		case 'N':
-			// ignore
-		default:
-			errorf("unexpected bind response: %q", t)
-		}
-	}
-}
-
-func (st *stmt) NumInput() int {
-	return len(st.paramTyps)
-}
-
-func parseComplete(s string) driver.Result {
-	parts := strings.Split(s, " ")
-	n, _ := strconv.ParseInt(parts[len(parts)-1], 10, 64)
-	return driver.RowsAffected(n)
-}
-
-type rows struct {
-	st   *stmt
-	done bool
-}
-
-func (rs *rows) Close() error {
-	for {
-		err := rs.Next(nil)
-		switch err {
-		case nil:
-		case io.EOF:
-			return nil
-		default:
-			return err
-		}
-	}
-	panic("not reached")
-}
-
-func (rs *rows) Columns() []string {
-	return rs.st.cols
-}
-
-func (rs *rows) Next(dest []driver.Value) (err error) {
-	if rs.done {
-		return io.EOF
-	}
-
-	defer errRecover(&err)
-
-	for {
-		t, r := rs.st.cn.recv1()
-		switch t {
-		case 'E':
-			err = parseError(r)
-		case 'C', 'S', 'N':
-			continue
-		case 'Z':
-			rs.done = true
-			if err != nil {
-				return err
-			}
-			return io.EOF
-		case 'D':
-			n := r.int16()
-			if n < len(dest) {
-				dest = dest[:n]
-			}
-			for i := range dest {
-				l := r.int32()
-				if l == -1 {
-					dest[i] = nil
-					continue
-				}
-				dest[i] = decode(r.next(l), rs.st.rowTyps[i])
-			}
-			return
-		default:
-			errorf("unexpected message after execute: %q", t)
-		}
-	}
-
-	panic("not reached")
 }
 
 func md5s(s string) string {

@@ -29,7 +29,7 @@ func RegisterDecoder(typ oid.Oid, d Decoder) {
 
 func encode(x interface{}, typ oid.Oid) []byte {
 
-	log.Printf("Encoding item as oid %d: <%v>", typ, x)
+	//log.Printf("Encoding item as oid %d: <%v>", typ, x)
 
 	// prefer explicitly registered encoders over built ins
 	encoder, ok := customEncoders[typ]
