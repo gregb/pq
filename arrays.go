@@ -4,7 +4,6 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"github.com/gregb/pq/oid"
-	"log"
 	"reflect"
 	"unicode"
 )
@@ -151,11 +150,9 @@ func (c *arrayConverter) decode(s []byte) (interface{}, error) {
 
 func (c *arrayConverter) encode(sliceAsIface interface{}) ([]byte, error) {
 	val := reflect.ValueOf(sliceAsIface)
-	log.Printf("Value is %v", val)
 
 	if val.Kind() == reflect.Ptr {
 		val = reflect.Indirect(val)
-		log.Printf("Value is %v", val)
 	}
 
 	if val.Kind() != reflect.Slice {
@@ -178,7 +175,6 @@ func (c *arrayConverter) encode(sliceAsIface interface{}) ([]byte, error) {
 	// append items
 	for i := 0; i < length; i++ {
 		element := val.Index(i).Interface()
-		log.Printf("item %d = %v (%T)", i, element, element)
 
 		// have to treat certain strings specially...
 		if elementType.Category() == oid.C_string {
@@ -195,8 +191,6 @@ func (c *arrayConverter) encode(sliceAsIface interface{}) ([]byte, error) {
 	}
 
 	bytes = append(bytes, '}')
-
-	log.Printf("Final pg array: %s", string(bytes))
 
 	return bytes, nil
 }
@@ -236,8 +230,7 @@ func encodeArrayString(s string, delimiter rune) []byte {
 		needsEscaping = true
 	} else {
 		// else check internally
-		for i, r := range runes {
-			log.Printf("s[%d] = %s", i, string(r))
+		for _, r := range runes {
 			if r == '"' || r == '\\' || r == delimiter {
 				needsEscaping = true
 				break
@@ -248,8 +241,6 @@ func encodeArrayString(s string, delimiter rune) []byte {
 	if !needsEscaping {
 		return []byte(s)
 	}
-
-	log.Printf("encodeArrayString(%s) needs escaping", s)
 
 	// second pass to process
 	modified := make([]byte, 0, len(s)+3)
@@ -265,8 +256,6 @@ func encodeArrayString(s string, delimiter rune) []byte {
 	}
 
 	modified = append(modified, '"')
-
-	log.Printf("Modified: %s", string(modified))
 
 	return modified
 }

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"github.com/gregb/pq/oid"
 	"io"
-	"log"
 	"strconv"
 	"strings"
 )
@@ -98,15 +97,11 @@ func (st *stmt) Exec(v []driver.Value) (res driver.Result, err error) {
 		case m_rowDescription:
 			st.parseRowDesciption(r)
 		case m_dataRow:
-			log.Printf("Received on stmt.Exec(): %q = %q", t, r)
-
 			if st.cols != nil {
 				st.execData = make([]driver.Value, len(st.cols), len(st.cols))
-				// we recieved a m_rowDescription at some point
+				// we received a m_rowDescription at some point
 				// so parse this now
 				st.parseDataRow(r, st.execData)
-
-				log.Printf("Received data: %v", st.execData)
 			}
 		default:
 			errorf("unknown exec response: %q", t)
