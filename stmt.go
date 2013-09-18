@@ -27,6 +27,7 @@ type stmt struct {
 func (st *stmt) ColumnConverter(idx int) driver.ValueConverter {
 	paramTyp := st.paramTyps[idx]
 
+	// TODO: If oid.Oid could implement ConvertValue directly, we wouldn't have to keep creating new ones?
 	if paramTyp.IsArray() {
 		return &arrayConverter{ArrayTyp: paramTyp}
 	}
@@ -42,7 +43,7 @@ func (st *stmt) Close() (err error) {
 	defer errRecover(&err)
 
 	w := st.cn.writeMessageType(m_close)
-	w.byte('S') // this is not a sync message, it's a specifier to the close command (to close a statement)
+	w.byte('S') // this is not a sync message, it's a parameter to the close command (to close a statement)
 	w.string(st.name)
 	st.cn.send(w)
 

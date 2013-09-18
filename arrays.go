@@ -11,6 +11,7 @@ import (
 // arrayConverter is a struct which remembers what type the array is, and provides
 // methods for converting between slices and the postgres string representation of
 // arrays.  Implements database/sql/driver.ValueConverter
+// TODO: Why not just implement the methods on oid.Oid directly?
 type arrayConverter struct {
 	ArrayTyp oid.Oid // The postgres typ of the array
 }
