@@ -10,38 +10,7 @@ import (
 	"time"
 )
 
-// Encoder is a function which turns a Go type into the string representation
-// that postgres needs for the associated the column type
-type Encoder func(interface{}) ([]byte, error)
-
-type Decoder func([]byte) (interface{}, error)
-
-var customEncoders = make(map[oid.Oid]Encoder)
-var customDecoders = make(map[oid.Oid]Decoder)
-
-func RegisterEncoder(typ oid.Oid, e Encoder) {
-	customEncoders[typ] = e
-}
-
-func RegisterDecoder(typ oid.Oid, d Decoder) {
-	customDecoders[typ] = d
-}
-
 func encode(x interface{}, typ oid.Oid) []byte {
-
-	//log.Printf("Encoding item as oid %d: <%v>", typ, x)
-
-	// prefer explicitly registered encoders over built ins
-	encoder, ok := customEncoders[typ]
-	if ok {
-		encoded, err := encoder(x)
-		if err != nil {
-			// this method could really use an error return
-			// i am pretty sure panicking is not a great thing to do here
-			panic(err)
-		}
-		return encoded
-	}
 
 	switch v := x.(type) {
 	case int64:
@@ -72,19 +41,6 @@ func encode(x interface{}, typ oid.Oid) []byte {
 }
 
 func decode(s []byte, typ oid.Oid) interface{} {
-
-	//log.Printf("Attempting to decode oid %d, value = <%s>", typ, string(s))
-	// prefer explicitly registered codecs over built ins
-	decoder, ok := customDecoders[typ]
-	if ok {
-		decoded, err := decoder(s)
-
-		if err != nil {
-			panic(err)
-		}
-
-		return decoded
-	}
 
 	if typ.IsArray() {
 		// TODO: Cache by oid?  Creating the same thing all the time could be slow
