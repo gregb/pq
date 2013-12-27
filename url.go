@@ -7,6 +7,8 @@ import (
 	"strings"
 )
 
+type kvs []string
+
 // ParseURL converts url to a connection string for driver.Open.
 // Example:
 //
@@ -31,38 +33,56 @@ func ParseURL(url string) (string, error) {
 		return "", fmt.Errorf("invalid connection protocol: %s", u.Scheme)
 	}
 
-	var kvs []string
-	accrue := func(k, v string) {
-		if v != "" {
-			kvs = append(kvs, k+"="+v)
-		}
-	}
+	params := new(kvs)
 
 	if u.User != nil {
 		v := u.User.Username()
-		accrue("user", v)
+		params.accrue("user", v)
 
 		v, _ = u.User.Password()
-		accrue("password", v)
+		params.accrue("password", v)
 	}
 
 	i := strings.Index(u.Host, ":")
 	if i < 0 {
-		accrue("host", u.Host)
+		params.accrue("host", u.Host)
 	} else {
-		accrue("host", u.Host[:i])
-		accrue("port", u.Host[i+1:])
+		params.accrue("host", u.Host[:i])
+		params.accrue("port", u.Host[i + 1:])
 	}
 
 	if u.Path != "" {
-		accrue("dbname", u.Path[1:])
+		params.accrue("dbname", u.Path[1:])
 	}
 
 	q := u.Query()
 	for k := range q {
-		accrue(k, q.Get(k))
+		params.accrue(k, q.Get(k))
 	}
 
-	sort.Strings(kvs) // Makes testing easier (not a performance concern)
-	return strings.Join(kvs, " "), nil
+	return params.String(), nil
+}
+
+func (kvs *kvs) accrue(k string, v interface{}) {
+
+	if v != "" {
+		s := fmt.Sprintf("%s=%v", k, v)
+		*kvs = append(*kvs, s)
+	}
+}
+
+func (kvs *kvs) String() string {
+	sort.Strings(*kvs) // Makes testing easier (not a performance concern)
+	return strings.Join(*kvs, " ")
+}
+
+func ParseMap(m map[string]interface{}) (string, error) {
+
+	params := new(kvs)
+
+	for k, v := range m {
+		params.accrue(k, v)
+	}
+
+	return params.String(), nil
 }
