@@ -6,7 +6,7 @@ import (
 )
 
 // Does not access database, simply tests the parser
-func Test_DecodeArrayString(t *testing.T) {
+func TestDecodeArrayString(t *testing.T) {
 
 	good := []string{
 		"{}",
@@ -64,7 +64,7 @@ func Test_DecodeArrayString(t *testing.T) {
 	}
 }
 
-func Test_DecodeVarcharArrayFromDb(t *testing.T) {
+func TestDecodeVarcharArrayFromDb(t *testing.T) {
 	db := openTestConn(t)
 	defer db.Close()
 
@@ -100,7 +100,7 @@ func Test_DecodeVarcharArrayFromDb(t *testing.T) {
 
 }
 
-func Test_DecodeInt64ArrayFromDb(t *testing.T) {
+func TestDecodeInt64ArrayFromDb(t *testing.T) {
 	db := openTestConn(t)
 	defer db.Close()
 
@@ -135,7 +135,7 @@ func Test_DecodeInt64ArrayFromDb(t *testing.T) {
 	}
 }
 
-func Test_StringArrayRoundtrip(t *testing.T) {
+func TestStringArrayRoundtrip(t *testing.T) {
 	db := openTestConn(t)
 	defer db.Close()
 
@@ -179,7 +179,7 @@ func Test_StringArrayRoundtrip(t *testing.T) {
 	}
 }
 
-func Test_IntArrayRoundtrip(t *testing.T) {
+func TestIntArrayRoundtrip(t *testing.T) {
 	db := openTestConn(t)
 	defer db.Close()
 
@@ -215,7 +215,7 @@ func Test_IntArrayRoundtrip(t *testing.T) {
 	}
 }
 
-func Test_FloatArrayRoundtrip(t *testing.T) {
+func TestFloatArrayRoundtrip(t *testing.T) {
 	db := openTestConn(t)
 	defer db.Close()
 

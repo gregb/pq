@@ -13,7 +13,8 @@ import (
 // arrays.  Implements database/sql/driver.ValueConverter
 // TODO: Why not just implement the methods on oid.Oid directly?
 type arrayConverter struct {
-	ArrayTyp oid.Oid // The postgres typ of the array
+	ArrayTyp        oid.Oid // The postgres typ of the array
+	parameterStatus *parameterStatus
 }
 
 // Parses arrays returned from postgres.
@@ -142,7 +143,7 @@ func (c *arrayConverter) decode(s []byte) (interface{}, error) {
 	// and populate it
 	for _, v := range strings {
 		// decode individually and add to slice
-		element := decode(v, elementTyp)
+		element := decode(c.parameterStatus, v, elementTyp)
 		elements = reflect.Append(elements, reflect.ValueOf(element))
 	}
 
@@ -181,7 +182,7 @@ func (c *arrayConverter) encode(sliceAsIface interface{}) ([]byte, error) {
 		if elementType.Category() == oid.C_string {
 			elementBytes = encodeArrayString(element.(string), rune(delimiter))
 		} else {
-			elementBytes = encode(element, elementType)
+			elementBytes = encode(c.parameterStatus, element, elementType)
 		}
 
 		if i > 0 {
@@ -196,6 +197,7 @@ func (c *arrayConverter) encode(sliceAsIface interface{}) ([]byte, error) {
 	return bytes, nil
 }
 
+// Implements driver.ValueConverter: ConvertValue(v interface{}) (Value, error)
 func (c *arrayConverter) ConvertValue(sliceAsIface interface{}) (driver.Value, error) {
 
 	bytes, err := c.encode(sliceAsIface)

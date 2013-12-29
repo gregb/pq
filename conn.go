@@ -12,11 +12,12 @@ import (
 	"fmt"
 	"github.com/gregb/pq/oid"
 	"io"
+	"log"
 	"net"
 	"os"
-	"path"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // message codes from http://www.postgresql.org/docs/9.2/static/protocol-message-formats.html
@@ -25,6 +26,7 @@ type frontendMessage byte
 
 const (
 	// backend messages.  received from server
+	m_notificationResponse backendMessage = 'A'
 	m_commandComplete      backendMessage = 'C'
 	m_dataRow              backendMessage = 'D'
 	m_error                backendMessage = 'E'
@@ -53,9 +55,11 @@ const (
 	m_terminate frontendMessage = 'X'
 )
 
+// Common error types
 var (
-	ErrSSLNotSupported = errors.New("pq: SSL is not enabled on the server")
-	ErrNotSupported    = errors.New("pq: invalid command")
+	ErrSSLNotSupported     = errors.New("pq: SSL is not enabled on the server")
+	ErrNotSupported        = errors.New("pq: Unsupported command")
+	ErrInFailedTransaction = errors.New("pq: Could not complete operation in a failed transaction")
 )
 
 type drv struct{}
@@ -68,11 +72,47 @@ func init() {
 	sql.Register("postgres", &drv{})
 }
 
+type parameterStatus struct {
+	// server version in the same format as server_version_num, or 0 if
+	// unavailable
+	serverVersion int
+
+	// the current location based on the TimeZone value of the session, if
+	// available
+	currentLocation *time.Location
+}
+
+type transactionStatus byte
+
+const (
+	txnStatusIdle                transactionStatus = 'I'
+	txnStatusIdleInTransaction   transactionStatus = 'T'
+	txnStatusInFailedTransaction transactionStatus = 'E'
+)
+
+func (s transactionStatus) String() string {
+	switch s {
+	case txnStatusIdle:
+		return "idle"
+	case txnStatusIdleInTransaction:
+		return "idle in transaction"
+	case txnStatusInFailedTransaction:
+		return "in a failed transaction"
+	default:
+		errorf("unknown transactionStatus %v", s)
+	}
+	panic("not reached")
+}
+
 type conn struct {
-	c       net.Conn
-	buf     *bufio.Reader
-	namei   int
-	scratch [512]byte
+	c                 net.Conn
+	buf               *bufio.Reader
+	namei             int
+	scratch           [512]byte
+	txnStatus         transactionStatus
+	parameterStatus   parameterStatus
+	saveMessageType   backendMessage
+	saveMessageBuffer *readBuf
 }
 
 func (c *conn) writeMessageType(b frontendMessage) *writeBuf {
@@ -89,9 +129,8 @@ func (c *conn) writeBuf(b byte) *writeBuf {
 
 func Open(name string) (_ driver.Conn, err error) {
 	defer errRecover(&err)
-	defer errRecoverWithPGReason(&err)
 
-	o := make(Values)
+	o := make(values)
 
 	// A number of defaults are applied here, in this order:
 	//
@@ -100,12 +139,42 @@ func Open(name string) (_ driver.Conn, err error) {
 	// * Explicitly passed connection information
 	o.Set("host", "localhost")
 	o.Set("port", "5432")
-
+	// N.B.: Extra float digits should be set to 3, but that breaks
+	// Postgres 8.4 and older, where the max is 2.
+	o.Set("extra_float_digits", "2")
 	for k, v := range parseEnviron(os.Environ()) {
 		o.Set(k, v)
 	}
 
-	parseOpts(name, o)
+	if strings.HasPrefix(name, "postgres://") {
+		name, err = ParseURL(name)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := parseOpts(name, o); err != nil {
+		return nil, err
+	}
+	// We can't work with any client_encoding other than UTF-8 currently.
+	// However, we have historically allowed the user to set it to UTF-8
+	// explicitly, and there's no reason to break such programs, so allow that.
+	// Note that the "options" setting could also set client_encoding, but
+	// parsing its value is not worth it.  Instead, we always explicitly send
+	// client_encoding as a separate run-time parameter, which should override
+	// anything set in options.
+	if enc := o.Get("client_encoding"); enc != "" && !isUTF8(enc) {
+		return nil, errors.New("client_encoding must be absent or 'UTF8'")
+	}
+	o.Set("client_encoding", "UTF8")
+	// DateStyle needs a similar treatment.
+	if datestyle := o.Get("datestyle"); datestyle != "" {
+		if datestyle != "ISO, MDY" {
+			panic(fmt.Sprintf("setting datestyle must be absent or %v; got %v",
+				"ISO, MDY", datestyle))
+		}
+	} else {
+		o.Set("datestyle", "ISO, MDY")
+	}
 
 	// If a user is not provided by any other means, the last
 	// resort is to use the current operating system provided user
@@ -131,60 +200,69 @@ func Open(name string) (_ driver.Conn, err error) {
 	return cn, nil
 }
 
-func network(o Values) (string, string) {
-	host := o.Get("host")
-
-	if strings.HasPrefix(host, "/") {
-		sockPath := path.Join(host, ".s.PGSQL."+o.Get("port"))
-		return "unix", sockPath
-	}
-
-	return "tcp", host + ":" + o.Get("port")
+func (cn *conn) isInTransaction() bool {
+	return cn.txnStatus == txnStatusIdleInTransaction ||
+		cn.txnStatus == txnStatusInFailedTransaction
 }
-
-type Values map[string]string
-
-func (vs Values) Set(k, v string) {
-	vs[k] = v
-}
-
-func (vs Values) Get(k string) (v string) {
-	return vs[k]
-}
-
-func parseOpts(name string, o Values) {
-	if len(name) == 0 {
-		return
-	}
-
-	name = strings.TrimSpace(name)
-
-	ps := strings.Split(name, " ")
-	for _, p := range ps {
-		kv := strings.Split(p, "=")
-		if len(kv) < 2 {
-			errorf("invalid option: %q", p)
-		}
-		o.Set(kv[0], kv[1])
+func (cn *conn) checkIsInTransaction(intxn bool) {
+	if cn.isInTransaction() != intxn {
+		errorf("unexpected transaction status %v", cn.txnStatus)
 	}
 }
-
-func (cn *conn) Begin() (driver.Tx, error) {
-	_, err := cn.Exec("BEGIN", nil)
+func (cn *conn) Begin() (_ driver.Tx, err error) {
+	defer errRecover(&err)
+	cn.checkIsInTransaction(false)
+	_, commandTag, err := cn.simpleExec("BEGIN")
 	if err != nil {
 		return nil, err
 	}
-	return cn, err
+	if commandTag != "BEGIN" {
+		return nil, fmt.Errorf(`unexpected command tag "%s"; expected COMMIT`, commandTag)
+	}
+	if cn.txnStatus != txnStatusIdleInTransaction {
+		return nil, fmt.Errorf("unexpected transaction status %v", cn.txnStatus)
+	}
+	return cn, nil
 }
 
-func (cn *conn) Commit() error {
-	_, err := cn.Exec("COMMIT", nil)
-	return err
+func (cn *conn) Commit() (err error) {
+	defer errRecover(&err)
+	cn.checkIsInTransaction(true)
+	// We don't want the client to think that everything is okay if it tries
+	// to commit a failed transaction.  However, no matter what we return,
+	// database/sql will release this connection back into the free connection
+	// pool so we have to abort the current transaction here.  Note that you
+	// would get the same behaviour if you issued a COMMIT in a failed
+	// transaction, so it's also the least surprising thing to do here.
+	if cn.txnStatus == txnStatusInFailedTransaction {
+		if err := cn.Rollback(); err != nil {
+			return err
+		}
+		return ErrInFailedTransaction
+	}
+	_, commandTag, err := cn.simpleExec("COMMIT")
+	if err != nil {
+		return err
+	}
+	if commandTag != "COMMIT" {
+		return fmt.Errorf(`unexpected command tag "%s"; expected COMMIT`, commandTag)
+	}
+	cn.checkIsInTransaction(false)
+	return nil
 }
 
-func (cn *conn) Rollback() error {
-	_, err := cn.Exec("ROLLBACK", nil)
-	return err
+func (cn *conn) Rollback() (err error) {
+	defer errRecover(&err)
+	cn.checkIsInTransaction(true)
+	_, commandTag, err := cn.simpleExec("ROLLBACK")
+	if err != nil {
+		return err
+	}
+	if commandTag != "ROLLBACK" {
+		return fmt.Errorf(`unexpected command tag "%s"; expected ROLLBACK`, commandTag)
+	}
+	cn.checkIsInTransaction(false)
+	return nil
 }
 
 func (cn *conn) gname() string {
@@ -192,35 +270,79 @@ func (cn *conn) gname() string {
 	return strconv.FormatInt(int64(cn.namei), 10)
 }
 
-func (cn *conn) simpleQuery(q string) (res driver.Result, err error) {
+func (cn *conn) simpleExec(q string) (res driver.Result, commandTag string, err error) {
 	defer errRecover(&err)
 
+	st := &stmt{cn: cn, name: "", query: q}
 	b := cn.writeMessageType(m_query)
 	b.string(q)
 	cn.send(b)
-
-	// just reusing it's slice members because we're doing the same thing stmt is doing
-	resultDataHolder := &stmt{}
 
 	for {
 		t, r := cn.recv1()
 		switch t {
 		case m_commandComplete:
-			count := parseComplete(r.string())
-			res = createResult(count, resultDataHolder.execData)
+			var rowsAffected int64
+			rowsAffected, commandTag = parseComplete(r.string())
+
+			if st.rowData != nil {
+				res = createResult(rowsAffected, st.rowData)
+			} else {
+				res = driver.RowsAffected(rowsAffected)
+			}
 		case m_readyForQuery:
+			cn.processReadyForQuery(r)
 			// done
 			return
 		case m_error:
 			err = parseError(r)
-		case m_notice, m_parameterStatus:
-			// ignore
 		case m_rowDescription:
-			resultDataHolder.parseRowDesciption(r)
+			st.parseRowDesciption(r)
 		case m_dataRow:
-			l := len(resultDataHolder.cols)
-			resultDataHolder.execData = make([]driver.Value, l, l)
-			resultDataHolder.parseDataRow(r, resultDataHolder.execData)
+			l := len(st.cols)
+			st.rowData = make([]driver.Value, l, l)
+			st.parseDataRow(r, st.rowData)
+		default:
+			errorf("unknown response for simple query: %q", t)
+		}
+	}
+	panic("not reached")
+}
+
+func (cn *conn) simpleQuery(q string) (res driver.Rows, err error) {
+	defer errRecover(&err)
+
+	st := &stmt{cn: cn, name: "", query: q}
+	b := cn.writeMessageType(m_query)
+	b.string(q)
+	cn.send(b)
+	for {
+		t, r := cn.recv1()
+		switch t {
+		case m_commandComplete:
+			// We allow queries which don't return any results through Query as
+			// well as Exec.  We still have to give database/sql a rows object
+			// the user can close, though, to avoid connections from being
+			// leaked.  A "rows" with done=true works fine for that purpose.
+			if err != nil {
+				errorf("unexpected CommandComplete in simple query execution")
+			}
+			res = &rows{st: st, done: true}
+		case m_readyForQuery:
+			cn.processReadyForQuery(r)
+			// done
+			return
+		case m_error:
+			res = nil
+			err = parseError(r)
+		case m_notice, m_parameterStatus:
+			// ignore any results
+		case m_rowDescription:
+			st.parseRowDesciption(r)
+
+			// After we get the meta, we want to kick out to Next()
+			res = &rows{st: st, done: false}
+			return
 		default:
 			errorf("unknown response for simple query: %q", t)
 		}
@@ -229,6 +351,9 @@ func (cn *conn) simpleQuery(q string) (res driver.Result, err error) {
 }
 
 func (cn *conn) prepareTo(q, stmtName string) (_ driver.Stmt, err error) {
+	return cn.prepareToSimpleStmt(q, stmtName)
+}
+func (cn *conn) prepareToSimpleStmt(q, stmtName string) (_ *stmt, err error) {
 	defer errRecover(&err)
 
 	st := &stmt{cn: cn, name: stmtName, query: q}
@@ -262,6 +387,7 @@ func (cn *conn) prepareTo(q, stmtName string) (_ driver.Stmt, err error) {
 		case m_noData:
 			// no data
 		case m_readyForQuery:
+			cn.processReadyForQuery(r)
 			return st, err
 		case m_error:
 			err = parseError(r)
@@ -277,6 +403,9 @@ func (cn *conn) prepareTo(q, stmtName string) (_ driver.Stmt, err error) {
 }
 
 func (cn *conn) Prepare(q string) (driver.Stmt, error) {
+	if len(q) >= 4 && strings.EqualFold(q[:4], "COPY") {
+		return cn.prepareCopyIn(q)
+	}
 	return cn.prepareTo(q, cn.gname())
 }
 
@@ -287,14 +416,37 @@ func (cn *conn) Close() (err error) {
 	return cn.c.Close()
 }
 
-// Implement the optional "Execer" interface for one-shot queries
-func (cn *conn) Exec(query string, args []driver.Value) (_ driver.Result, err error) {
+// Implement the "Queryer" interface
+func (cn *conn) Query(query string, args []driver.Value) (_ driver.Rows, err error) {
 	defer errRecover(&err)
 
+	log.Printf("conn.Query(query=%s, args=%v)", query, args)
 	// Check to see if we can use the "simpleQuery" interface, which is
 	// *much* faster than going through prepare/exec
 	if len(args) == 0 {
 		return cn.simpleQuery(query)
+	}
+
+	st, err := cn.prepareToSimpleStmt(query, "")
+
+	log.Printf("st=%v, err=%s", st, err)
+	if err != nil {
+		panic(err)
+	}
+	st.exec(args)
+	return &rows{st: st}, nil
+}
+
+// Implement the optional "Execer" interface for one-shot queries
+func (cn *conn) Exec(query string, args []driver.Value) (_ driver.Result, err error) {
+	defer errRecover(&err)
+
+	// Check to see if we can use the "simpleExec" interface, which is
+	// *much* faster than going through prepare/exec
+	if len(args) == 0 {
+		// ignore commandTag, our caller doesn't care
+		r, _, err := cn.simpleExec(query)
+		return r, err
 	}
 
 	// Use the unnamed statement to defer planning until bind
@@ -322,15 +474,60 @@ func (cn *conn) send(m *writeBuf) {
 		*m = b
 	}
 
+	log.Printf("Sending: %s", m)
 	_, err := cn.c.Write(*m)
 	if err != nil {
 		panic(err)
 	}
 }
 
+// recvMessage receives any message from the backend, or returns an error if
+// a problem occurred while reading the message.
+func (cn *conn) recvMessage() (backendMessage, *readBuf, error) {
+	// workaround for a QueryRow bug, see exec
+	if cn.saveMessageType != 0 {
+		t, r := cn.saveMessageType, cn.saveMessageBuffer
+		cn.saveMessageType = 0
+		cn.saveMessageBuffer = nil
+		return t, r, nil
+	}
+
+	x := cn.scratch[:5]
+	_, err := io.ReadFull(cn.buf, x)
+	if err != nil {
+		return 0, nil, err
+	}
+	t := backendMessage(x[0])
+
+	b := readBuf(x[1:])
+
+	log.Printf("Received: (%c) %s", t, b)
+
+	n := b.int32() - 4
+	var y []byte
+	if n <= len(cn.scratch) {
+		y = cn.scratch[:n]
+	} else {
+		y = make([]byte, n)
+	}
+	_, err = io.ReadFull(cn.buf, y)
+	if err != nil {
+		return 0, nil, err
+	}
+	return t, (*readBuf)(&y), nil
+}
+
+// recv receives a message from the backend, but if an error happened while
+// reading the message or the received message was an ErrorResponse, it panics.
+// NoticeResponses are ignored.  This function should generally be used only
+// during the startup sequence.
 func (cn *conn) recv() (t backendMessage, r *readBuf) {
 	for {
-		t, r = cn.recv1()
+		var err error
+		t, r, err = cn.recvMessage()
+		if err != nil {
+			panic(err)
+		}
 		switch t {
 		case m_error:
 			panic(parseError(r))
@@ -344,31 +541,32 @@ func (cn *conn) recv() (t backendMessage, r *readBuf) {
 	panic("not reached")
 }
 
-func (cn *conn) recv1() (backendMessage, *readBuf) {
-	x := cn.scratch[:5]
-	_, err := io.ReadFull(cn.buf, x)
-	if err != nil {
-		panic(err)
-	}
-	c := backendMessage(x[0])
+// recv1 receives a message from the backend, panicking if an error occurs
+// while attempting to read it.  All asynchronous messages are ignored, with
+// the exception of ErrorResponse.
+func (cn *conn) recv1() (t backendMessage, r *readBuf) {
+	for {
+		var err error
+		t, r, err = cn.recvMessage()
+		if err != nil {
+			panic(err)
+		}
 
-	b := readBuf(x[1:])
-	n := b.int32() - 4
-	var y []byte
-	if n <= len(cn.scratch) {
-		y = cn.scratch[:n]
-	} else {
-		y = make([]byte, n)
-	}
-	_, err = io.ReadFull(cn.buf, y)
-	if err != nil {
-		panic(err)
+		switch t {
+		case m_notificationResponse:
+		case m_notice:
+			// ignore
+		case m_parameterStatus:
+			cn.processParameterStatus(r)
+		default:
+			return
+		}
 	}
 
-	return c, (*readBuf)(&y)
+	panic("not reached")
 }
 
-func (cn *conn) ssl(o Values) {
+func (cn *conn) ssl(o values) {
 	tlsConf := tls.Config{}
 	switch mode := o.Get("sslmode"); mode {
 	case "require", "":
@@ -398,23 +596,40 @@ func (cn *conn) ssl(o Values) {
 	cn.c = tls.Client(cn.c, &tlsConf)
 }
 
-func (cn *conn) startup(o Values) {
+func (cn *conn) startup(o values) {
 	w := cn.writeBuf(0)
 	w.int32(196608)
-	w.string("user")
-	w.string(o.Get("user"))
-	w.string("database")
-	w.string(o.Get("dbname"))
+	// Send the backend the name of the database we want to connect to, and the
+	// user we want to connect as.  Additionally, we send over any run-time
+	// parameters potentially included in the connection string.  If the server
+	// doesn't recognize any of them, it will reply with an error.
+	for k, v := range o {
+		// skip options which can't be run-time parameters
+		if k == "password" || k == "host" ||
+			k == "port" || k == "sslmode" {
+			continue
+		}
+		// The protocol requires us to supply the database name as "database"
+		// instead of "dbname".
+		if k == "dbname" {
+			k = "database"
+		}
+		w.string(k)
+		w.string(v)
+	}
 	w.string("")
 	cn.send(w)
 
 	for {
 		t, r := cn.recv()
 		switch t {
-		case m_keyData, 'S':
+		case m_keyData:
+		case 'S':
+			cn.processParameterStatus(r)
 		case m_authenticate:
 			cn.auth(r, o)
 		case m_readyForQuery:
+			cn.processReadyForQuery(r)
 			return
 		default:
 			errorf("unknown response for startup: %q", t)
@@ -422,7 +637,7 @@ func (cn *conn) startup(o Values) {
 	}
 }
 
-func (cn *conn) auth(r *readBuf, o Values) {
+func (cn *conn) auth(r *readBuf, o values) {
 	switch code := r.int32(); code {
 	case 0:
 		// OK
@@ -464,6 +679,32 @@ func md5s(s string) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
+func (c *conn) processParameterStatus(r *readBuf) {
+	var err error
+	param := r.string()
+	switch param {
+	case "server_version":
+		var major1 int
+		var major2 int
+		var minor int
+		_, err = fmt.Sscanf(r.string(), "%d.%d.%d", &major1, &major2, &minor)
+		if err == nil {
+			c.parameterStatus.serverVersion = major1*10000 + major2*100 + minor
+		}
+	case "TimeZone":
+		c.parameterStatus.currentLocation, err = time.LoadLocation(r.string())
+		if err != nil {
+			c.parameterStatus.currentLocation = nil
+		}
+	default:
+		// ignore
+	}
+}
+
+func (c *conn) processReadyForQuery(r *readBuf) {
+	c.txnStatus = transactionStatus(r.byte())
+}
+
 // parseEnviron tries to mimic some of libpq's environment handling
 //
 // To ease testing, it does not directly reference os.Environ, but is
@@ -481,15 +722,21 @@ func parseEnviron(env []string) (out map[string]string) {
 		accrue := func(keyname string) {
 			out[keyname] = parts[1]
 		}
+		unsupported := func() {
+			panic(fmt.Sprintf("setting %v not supported", parts[0]))
+		}
 
 		// The order of these is the same as is seen in the
-		// PostgreSQL 9.1 manual, with omissions briefly
-		// noted.
+		// PostgreSQL 9.1 manual. Unsupported but well-defined
+		// keys cause a panic; these should be unset prior to
+		// execution. Options which pq expects to be set to a
+		// certain value are allowed, but must be set to that
+		// value if present (they can, of course, be absent).
 		switch parts[0] {
 		case "PGHOST":
 			accrue("host")
 		case "PGHOSTADDR":
-			accrue("hostaddr")
+			unsupported()
 		case "PGPORT":
 			accrue("port")
 		case "PGDATABASE":
@@ -498,38 +745,50 @@ func parseEnviron(env []string) (out map[string]string) {
 			accrue("user")
 		case "PGPASSWORD":
 			accrue("password")
-			// skip PGPASSFILE, PGSERVICE, PGSERVICEFILE,
-			// PGREALM
+		case "PGPASSFILE", "PGSERVICE", "PGSERVICEFILE", "PGREALM":
+			unsupported()
 		case "PGOPTIONS":
 			accrue("options")
 		case "PGAPPNAME":
 			accrue("application_name")
 		case "PGSSLMODE":
 			accrue("sslmode")
-		case "PGREQUIRESSL":
-			accrue("requiressl")
-		case "PGSSLCERT":
-			accrue("sslcert")
-		case "PGSSLKEY":
-			accrue("sslkey")
-		case "PGSSLROOTCERT":
-			accrue("sslrootcert")
-		case "PGSSLCRL":
-			accrue("sslcrl")
+		case "PGREQUIRESSL", "PGSSLCERT", "PGSSLKEY", "PGSSLROOTCERT", "PGSSLCRL":
+			unsupported()
 		case "PGREQUIREPEER":
-			accrue("requirepeer")
-		case "PGKRBSRVNAME":
-			accrue("krbsrvname")
-		case "PGGSSLIB":
-			accrue("gsslib")
+			unsupported()
+		case "PGKRBSRVNAME", "PGGSSLIB":
+			unsupported()
 		case "PGCONNECT_TIMEOUT":
-			accrue("connect_timeout")
+			unsupported()
 		case "PGCLIENTENCODING":
 			accrue("client_encoding")
-			// skip PGDATESTYLE, PGTZ, PGGEQO, PGSYSCONFDIR,
-			// PGLOCALEDIR
+		case "PGDATESTYLE":
+			accrue("datestyle")
+		case "PGTZ":
+			accrue("timezone")
+		case "PGGEQO":
+			accrue("geqo")
+		case "PGSYSCONFDIR", "PGLOCALEDIR":
+			unsupported()
 		}
 	}
 
 	return out
+}
+
+// isUTF8 returns whether name is a fuzzy variation of the string "UTF-8".
+func isUTF8(name string) bool {
+	// Recognize all sorts of silly things as "UTF-8", like Postgres does
+	s := strings.Map(alnumLowerASCII, name)
+	return s == "utf8" || s == "unicode"
+}
+func alnumLowerASCII(ch rune) rune {
+	if 'A' <= ch && ch <= 'Z' {
+		return ch + ('a' - 'A')
+	}
+	if 'a' <= ch && ch <= 'z' || '0' <= ch && ch <= '9' {
+		return ch
+	}
+	return -1 // discard
 }

@@ -11,9 +11,6 @@ Many sections of the code below are generated using queries into the pg_type tab
 see the accompanying generator.sql file for these queries.
 */
 
-type Oid uint32
-type Category byte
-
 var BYTE_ARRRY_TYPE = reflect.TypeOf(*new([]byte))
 
 const (
