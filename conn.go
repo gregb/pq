@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/gregb/pq/message"
 	"github.com/gregb/pq/oid"
 	"io"
 	"log"
@@ -20,47 +21,14 @@ import (
 	"time"
 )
 
-// message codes from http://www.postgresql.org/docs/9.2/static/protocol-message-formats.html
-type backendMessage byte
-type frontendMessage byte
-
-const (
-	// backend messages.  received from server
-	m_notificationResponse backendMessage = 'A'
-	m_commandComplete      backendMessage = 'C'
-	m_dataRow              backendMessage = 'D'
-	m_error                backendMessage = 'E'
-	m_keyData              backendMessage = 'K'
-	m_authenticate         backendMessage = 'R'
-	m_parameterStatus      backendMessage = 'S'
-	m_rowDescription       backendMessage = 'T'
-	m_parameterDescription backendMessage = 't'
-	m_noData               backendMessage = 'n'
-	m_notice               backendMessage = 'N'
-	m_readyForQuery        backendMessage = 'Z'
-	m_parseComplete        backendMessage = '1'
-	m_bindComplete         backendMessage = '2'
-	m_closeComplete        backendMessage = '3'
-)
-
-const (
-	// frontend messages.  sent to server
-	m_close     frontendMessage = 'C'
-	m_describe  frontendMessage = 'D'
-	m_execute   frontendMessage = 'E'
-	m_parse     frontendMessage = 'P'
-	m_password  frontendMessage = 'p'
-	m_query     frontendMessage = 'Q'
-	m_sync      frontendMessage = 'S'
-	m_terminate frontendMessage = 'X'
-)
-
 // Common error types
 var (
 	ErrSSLNotSupported     = errors.New("pq: SSL is not enabled on the server")
 	ErrNotSupported        = errors.New("pq: Unsupported command")
 	ErrInFailedTransaction = errors.New("pq: Could not complete operation in a failed transaction")
 )
+
+var trafficLogging bool = false
 
 type drv struct{}
 
@@ -111,13 +79,23 @@ type conn struct {
 	scratch           [512]byte
 	txnStatus         transactionStatus
 	parameterStatus   parameterStatus
-	saveMessageType   backendMessage
+	saveMessageType   message.Backend
 	saveMessageBuffer *readBuf
 }
 
-func (c *conn) writeMessageType(b frontendMessage) *writeBuf {
+func (c *conn) writeMessageType(b message.Frontend) *writeBuf {
 	c.scratch[0] = byte(b)
 	w := writeBuf(c.scratch[:5])
+
+	// TODO: Better way to do this?
+	// The saved message type and buffer from the workaround
+	// should not be saved between queries. If a query message
+	// is being sent, clear them out
+	if b == message.Query {
+		c.saveMessageBuffer = nil
+		c.saveMessageType = 0
+	}
+
 	return &w
 }
 
@@ -217,7 +195,7 @@ func (cn *conn) Begin() (_ driver.Tx, err error) {
 		return nil, err
 	}
 	if commandTag != "BEGIN" {
-		return nil, fmt.Errorf(`unexpected command tag "%s"; expected COMMIT`, commandTag)
+		return nil, fmt.Errorf(`unexpected command tag "%s"; expected BEGIN`, commandTag)
 	}
 	if cn.txnStatus != txnStatusIdleInTransaction {
 		return nil, fmt.Errorf("unexpected transaction status %v", cn.txnStatus)
@@ -274,14 +252,14 @@ func (cn *conn) simpleExec(q string) (res driver.Result, commandTag string, err 
 	defer errRecover(&err)
 
 	st := &stmt{cn: cn, name: "", query: q}
-	b := cn.writeMessageType(m_query)
+	b := cn.writeMessageType(message.Query)
 	b.string(q)
 	cn.send(b)
 
 	for {
 		t, r := cn.recv1()
 		switch t {
-		case m_commandComplete:
+		case message.CommandComplete:
 			var rowsAffected int64
 			rowsAffected, commandTag = parseComplete(r.string())
 
@@ -290,15 +268,15 @@ func (cn *conn) simpleExec(q string) (res driver.Result, commandTag string, err 
 			} else {
 				res = driver.RowsAffected(rowsAffected)
 			}
-		case m_readyForQuery:
+		case message.ReadyForQuery:
 			cn.processReadyForQuery(r)
 			// done
 			return
-		case m_error:
+		case message.Error:
 			err = parseError(r)
-		case m_rowDescription:
+		case message.RowDescription:
 			st.parseRowDesciption(r)
-		case m_dataRow:
+		case message.DataRow:
 			l := len(st.cols)
 			st.rowData = make([]driver.Value, l, l)
 			st.parseDataRow(r, st.rowData)
@@ -313,13 +291,13 @@ func (cn *conn) simpleQuery(q string) (res driver.Rows, err error) {
 	defer errRecover(&err)
 
 	st := &stmt{cn: cn, name: "", query: q}
-	b := cn.writeMessageType(m_query)
+	b := cn.writeMessageType(message.Query)
 	b.string(q)
 	cn.send(b)
 	for {
 		t, r := cn.recv1()
 		switch t {
-		case m_commandComplete:
+		case message.CommandComplete:
 			// We allow queries which don't return any results through Query as
 			// well as Exec.  We still have to give database/sql a rows object
 			// the user can close, though, to avoid connections from being
@@ -328,16 +306,18 @@ func (cn *conn) simpleQuery(q string) (res driver.Rows, err error) {
 				errorf("unexpected CommandComplete in simple query execution")
 			}
 			res = &rows{st: st, done: true}
-		case m_readyForQuery:
+		case message.ReadyForQuery:
 			cn.processReadyForQuery(r)
 			// done
 			return
-		case m_error:
+		case message.Error:
 			res = nil
 			err = parseError(r)
-		case m_notice, m_parameterStatus:
+		case message.Notice:
+			// ignore
+		case message.ParameterStatus:
 			// ignore any results
-		case m_rowDescription:
+		case message.RowDescription:
 			st.parseRowDesciption(r)
 
 			// After we get the meta, we want to kick out to Next()
@@ -358,40 +338,41 @@ func (cn *conn) prepareToSimpleStmt(q, stmtName string) (_ *stmt, err error) {
 
 	st := &stmt{cn: cn, name: stmtName, query: q}
 
-	b := cn.writeMessageType(m_parse)
+	b := cn.writeMessageType(message.Parse)
 	b.string(st.name)
 	b.string(q)
 	b.int16(0)
 	cn.send(b)
 
-	b = cn.writeMessageType(m_describe)
+	b = cn.writeMessageType(message.Describe)
 	b.byte('S') // statement
 	b.string(st.name)
 	cn.send(b)
 
-	cn.send(cn.writeMessageType(m_sync))
+	cn.send(cn.writeMessageType(message.Sync))
 
 	for {
 		t, r := cn.recv1()
 		switch t {
-		case m_parseComplete, m_bindComplete, m_notice:
-		case m_parameterDescription:
+		case message.ParseComplete:
+			// ignore
+		case message.ParameterDescription:
 			nparams := int(r.int16())
 			st.paramTyps = make([]oid.Oid, nparams)
 
 			for i := range st.paramTyps {
 				st.paramTyps[i] = r.oid()
 			}
-		case m_rowDescription:
+		case message.RowDescription:
 			st.parseRowDesciption(r)
-		case m_noData:
+		case message.NoData:
 			// no data
-		case m_readyForQuery:
+		case message.ReadyForQuery:
 			cn.processReadyForQuery(r)
 			return st, err
-		case m_error:
+		case message.Error:
 			err = parseError(r)
-		case m_commandComplete:
+		case message.CommandComplete:
 			// command complete
 			return st, err
 		default:
@@ -411,16 +392,19 @@ func (cn *conn) Prepare(q string) (driver.Stmt, error) {
 
 func (cn *conn) Close() (err error) {
 	defer errRecover(&err)
-	cn.send(cn.writeMessageType(m_terminate))
+	cn.send(cn.writeMessageType(message.Terminate))
 
 	return cn.c.Close()
 }
 
-// Implement the "Queryer" interface
+// Let's NOT implement the "Queryer" interface...
+// It interferes with array parameter preparation
+// which is only available on statements (and Query()
+// does not use a statement)
+/*
 func (cn *conn) Query(query string, args []driver.Value) (_ driver.Rows, err error) {
 	defer errRecover(&err)
 
-	log.Printf("conn.Query(query=%s, args=%v)", query, args)
 	// Check to see if we can use the "simpleQuery" interface, which is
 	// *much* faster than going through prepare/exec
 	if len(args) == 0 {
@@ -429,15 +413,16 @@ func (cn *conn) Query(query string, args []driver.Value) (_ driver.Rows, err err
 
 	st, err := cn.prepareToSimpleStmt(query, "")
 
-	log.Printf("st=%v, err=%s", st, err)
 	if err != nil {
 		panic(err)
 	}
 	st.exec(args)
 	return &rows{st: st}, nil
 }
+*/
 
 // Implement the optional "Execer" interface for one-shot queries
+
 func (cn *conn) Exec(query string, args []driver.Value) (_ driver.Result, err error) {
 	defer errRecover(&err)
 
@@ -474,7 +459,10 @@ func (cn *conn) send(m *writeBuf) {
 		*m = b
 	}
 
-	log.Printf("Sending: %s", m)
+	if trafficLogging {
+		log.Printf("Sending : (%c) %q", (*m)[0], b)
+	}
+
 	_, err := cn.c.Write(*m)
 	if err != nil {
 		panic(err)
@@ -483,12 +471,17 @@ func (cn *conn) send(m *writeBuf) {
 
 // recvMessage receives any message from the backend, or returns an error if
 // a problem occurred while reading the message.
-func (cn *conn) recvMessage() (backendMessage, *readBuf, error) {
+func (cn *conn) recvMessage() (message.Backend, *readBuf, error) {
 	// workaround for a QueryRow bug, see exec
 	if cn.saveMessageType != 0 {
 		t, r := cn.saveMessageType, cn.saveMessageBuffer
 		cn.saveMessageType = 0
 		cn.saveMessageBuffer = nil
+
+		if trafficLogging {
+			log.Printf("Returning worked-around saved message: (%c) %q", t, (*r))
+		}
+
 		return t, r, nil
 	}
 
@@ -497,11 +490,13 @@ func (cn *conn) recvMessage() (backendMessage, *readBuf, error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	t := backendMessage(x[0])
+	t := message.Backend(x[0])
 
 	b := readBuf(x[1:])
 
-	log.Printf("Received: (%c) %s", t, b)
+	if trafficLogging {
+		log.Printf("Received: (%c) %q", t, b)
+	}
 
 	n := b.int32() - 4
 	var y []byte
@@ -521,7 +516,7 @@ func (cn *conn) recvMessage() (backendMessage, *readBuf, error) {
 // reading the message or the received message was an ErrorResponse, it panics.
 // NoticeResponses are ignored.  This function should generally be used only
 // during the startup sequence.
-func (cn *conn) recv() (t backendMessage, r *readBuf) {
+func (cn *conn) recv() (t message.Backend, r *readBuf) {
 	for {
 		var err error
 		t, r, err = cn.recvMessage()
@@ -529,9 +524,9 @@ func (cn *conn) recv() (t backendMessage, r *readBuf) {
 			panic(err)
 		}
 		switch t {
-		case m_error:
+		case message.Error:
 			panic(parseError(r))
-		case m_notice:
+		case message.Notice:
 			// ignore
 		default:
 			return
@@ -544,7 +539,7 @@ func (cn *conn) recv() (t backendMessage, r *readBuf) {
 // recv1 receives a message from the backend, panicking if an error occurs
 // while attempting to read it.  All asynchronous messages are ignored, with
 // the exception of ErrorResponse.
-func (cn *conn) recv1() (t backendMessage, r *readBuf) {
+func (cn *conn) recv1() (t message.Backend, r *readBuf) {
 	for {
 		var err error
 		t, r, err = cn.recvMessage()
@@ -553,10 +548,9 @@ func (cn *conn) recv1() (t backendMessage, r *readBuf) {
 		}
 
 		switch t {
-		case m_notificationResponse:
-		case m_notice:
+		case message.NotificationResponse, message.Notice:
 			// ignore
-		case m_parameterStatus:
+		case message.ParameterStatus:
 			cn.processParameterStatus(r)
 		default:
 			return
@@ -623,12 +617,13 @@ func (cn *conn) startup(o values) {
 	for {
 		t, r := cn.recv()
 		switch t {
-		case m_keyData:
-		case 'S':
+		case message.KeyData:
+			// ?
+		case message.ParameterStatus:
 			cn.processParameterStatus(r)
-		case m_authenticate:
+		case message.Authenticate:
 			cn.auth(r, o)
-		case m_readyForQuery:
+		case message.ReadyForQuery:
 			cn.processReadyForQuery(r)
 			return
 		default:
@@ -642,12 +637,12 @@ func (cn *conn) auth(r *readBuf, o values) {
 	case 0:
 		// OK
 	case 3:
-		w := cn.writeMessageType(m_password)
+		w := cn.writeMessageType(message.Password)
 		w.string(o.Get("password"))
 		cn.send(w)
 
 		t, r := cn.recv()
-		if t != m_authenticate {
+		if t != message.Authenticate {
 			errorf("unexpected password response: %q", t)
 		}
 
@@ -656,12 +651,12 @@ func (cn *conn) auth(r *readBuf, o values) {
 		}
 	case 5:
 		s := string(r.next(4))
-		w := cn.writeMessageType(m_password)
+		w := cn.writeMessageType(message.Password)
 		w.string("md5" + md5s(md5s(o.Get("password")+o.Get("user"))+s))
 		cn.send(w)
 
 		t, r := cn.recv()
-		if t != m_authenticate {
+		if t != message.Authenticate {
 			errorf("unexpected password response: %q", t)
 		}
 
@@ -697,7 +692,10 @@ func (c *conn) processParameterStatus(r *readBuf) {
 			c.parameterStatus.currentLocation = nil
 		}
 	default:
-		// ignore
+		if trafficLogging {
+			val := r.string()
+			log.Printf("Unhandled parameter status: %s = %s", param, val)
+		}
 	}
 }
 

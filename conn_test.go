@@ -102,7 +102,7 @@ func TestCommitInFailedTransaction(t *testing.T) {
 	}
 }
 func TestOpenURL(t *testing.T) {
-	db, err := openTestConnConninfo("postgres://")
+	db, err := openTestConnConninfo("postgres://pqgotest:pqgotest@localhost:5432")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -799,7 +799,7 @@ func TestRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = tx.Query(sqlInsert)
+	_, err = tx.Exec(sqlInsert)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -875,18 +875,18 @@ func TestRuntimeParameters(t *testing.T) {
 		expectedOutcome RuntimeTestResult
 	}{
 		// invalid parameter
-		{"DOESNOTEXIST=foo", "", "", ResultBadConn},
+		{"user=pqgotest password=pqgotest DOESNOTEXIST=foo", "", "", ResultBadConn},
 		// we can only work with a specific value for these two
-		{"client_encoding=SQL_ASCII", "", "", ResultError},
-		{"datestyle='ISO, YDM'", "", "", ResultPanic},
+		{"user=pqgotest password=pqgotest client_encoding=SQL_ASCII", "", "", ResultError},
+		{"user=pqgotest password=pqgotest datestyle='ISO, YDM'", "", "", ResultPanic},
 		// "options" should work exactly as it does in libpq
-		{"options='-c search_path=pqgotest'", "search_path", "pqgotest", ResultSuccess},
+		{"user=pqgotest password=pqgotest options='-c search_path=pqgotest'", "search_path", "pqgotest", ResultSuccess},
 		// pq should override client_encoding in this case
-		{"options='-c client_encoding=SQL_ASCII'", "client_encoding", "UTF8", ResultSuccess},
+		{"user=pqgotest password=pqgotest options='-c client_encoding=SQL_ASCII'", "client_encoding", "UTF8", ResultSuccess},
 		// allow client_encoding to be set explicitly
-		{"client_encoding=UTF8", "client_encoding", "UTF8", ResultSuccess},
+		{"user=pqgotest password=pqgotest client_encoding=UTF8", "client_encoding", "UTF8", ResultSuccess},
 		// test a runtime parameter not supported by libpq
-		{"work_mem='139kB'", "work_mem", "139kB", ResultSuccess},
+		{"user=pqgotest password=pqgotest work_mem='139kB'", "work_mem", "139kB", ResultSuccess},
 	}
 	for _, test := range tests {
 		db, err := openTestConnConninfo(test.conninfo)

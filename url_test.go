@@ -57,8 +57,8 @@ func TestParseMap(t *testing.T) {
 
 	m := map[string]interface{}{
 		"ssl-mode": "disable",
-		"host": "localhost",
-		"port": 5432,
+		"host":     "localhost",
+		"port":     5432,
 	}
 
 	expected := "host=localhost port=5432 ssl-mode=disable"

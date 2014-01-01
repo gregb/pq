@@ -3,9 +3,9 @@ package pq
 import (
 	"database/sql/driver"
 	"errors"
+	"github.com/gregb/pq/message"
 	"github.com/gregb/pq/oid"
 	"io"
-	"log"
 	"strconv"
 	"strings"
 )
@@ -30,8 +30,6 @@ type stmt struct {
 func (st *stmt) ColumnConverter(idx int) driver.ValueConverter {
 	paramTyp := st.paramTyps[idx]
 
-	log.Printf("st.ColumnConverter(%d)", idx)
-
 	// TODO: If oid.Oid could implement ConvertValue directly, we wouldn't have to keep creating new ones?
 	if paramTyp.IsArray() {
 		return &arrayConverter{ArrayTyp: paramTyp}
@@ -47,21 +45,21 @@ func (st *stmt) Close() (err error) {
 
 	defer errRecover(&err)
 
-	w := st.cn.writeMessageType(m_close)
+	w := st.cn.writeMessageType(message.Close)
 	w.byte('S') // this is not a sync message, it's a parameter to the close command (to close a statement)
 	w.string(st.name)
 	st.cn.send(w)
 
-	st.cn.send(st.cn.writeMessageType(m_sync))
+	st.cn.send(st.cn.writeMessageType(message.Sync))
 
-	t, r := st.cn.recv()
-	if t != m_closeComplete {
+	t, r := st.cn.recv1()
+	if t != message.CloseComplete {
 		errorf("unexpected close response: %q", t)
 	}
 	st.closed = true
 
-	t, r = st.cn.recv()
-	if t != m_readyForQuery {
+	t, r = st.cn.recv1()
+	if t != message.ReadyForQuery {
 		errorf("expected ready for query, but got: %q", t)
 	}
 	st.cn.processReadyForQuery(r)
@@ -71,8 +69,6 @@ func (st *stmt) Close() (err error) {
 
 func (st *stmt) Query(v []driver.Value) (_ driver.Rows, err error) {
 	defer errRecover(&err)
-
-	log.Printf("st.Query(%v)", v)
 	st.exec(v)
 	return &rows{st: st}, nil
 }
@@ -80,7 +76,6 @@ func (st *stmt) Query(v []driver.Value) (_ driver.Rows, err error) {
 func (st *stmt) Exec(v []driver.Value) (res driver.Result, err error) {
 	defer errRecover(&err)
 
-	log.Printf("st.Exec(%v)", v)
 	if len(v) == 0 {
 		// ignore commandTag, our caller doesn't care
 		r, _, err := st.cn.simpleExec(st.query)
@@ -90,10 +85,13 @@ func (st *stmt) Exec(v []driver.Value) (res driver.Result, err error) {
 
 	for {
 		t, r := st.cn.recv1()
+
 		switch t {
-		case m_error:
+
+		case message.Error:
 			err = parseError(r)
-		case m_commandComplete:
+		case message.CommandComplete:
+
 			rowsAffected, _ := parseComplete(r.string())
 
 			if st.rowData != nil {
@@ -101,14 +99,14 @@ func (st *stmt) Exec(v []driver.Value) (res driver.Result, err error) {
 			} else {
 				res = driver.RowsAffected(rowsAffected)
 			}
-		case m_readyForQuery:
+		case message.ReadyForQuery:
 			// done
 			return
-		case m_notice, m_parameterStatus:
+		case message.Notice, message.ParameterStatus:
 			// ignore
-		case m_rowDescription:
+		case message.RowDescription:
 			st.parseRowDesciption(r)
-		case m_dataRow:
+		case message.DataRow:
 			if st.cols != nil {
 				st.rowData = make([]driver.Value, len(st.cols), len(st.cols))
 				// we received a m_rowDescription at some point
@@ -127,7 +125,8 @@ func (st *stmt) exec(v []driver.Value) {
 	if len(v) != len(st.paramTyps) {
 		errorf("got %d parameters but the statement requires %d", len(v), len(st.paramTyps))
 	}
-	w := st.cn.writeBuf('B')
+
+	w := st.cn.writeMessageType(message.Bind)
 	w.string("")
 	w.string(st.name)
 	w.int16(0)
@@ -144,31 +143,31 @@ func (st *stmt) exec(v []driver.Value) {
 	w.int16(0)
 	st.cn.send(w)
 
-	w = st.cn.writeMessageType(m_execute)
+	w = st.cn.writeMessageType(message.Execute)
 	w.string("")
 	w.int32(0)
 	st.cn.send(w)
 
-	st.cn.send(st.cn.writeMessageType(m_sync))
+	st.cn.send(st.cn.writeMessageType(message.Sync))
 
 	var err error
 	for {
 		t, r := st.cn.recv1()
 		switch t {
-		case m_error:
+		case message.Error:
 			err = parseError(r)
-		case m_bindComplete:
+		case message.BindComplete:
 			if err != nil {
 				panic(err)
 			}
 			goto workaround
-		case m_readyForQuery:
+		case message.ReadyForQuery:
 			st.cn.processReadyForQuery(r)
 			if err != nil {
 				panic(err)
 			}
 			return
-		case m_notice:
+		case message.Notice:
 			// ignore
 		default:
 			errorf("unexpected bind response: %q", t)
@@ -185,17 +184,19 @@ func (st *stmt) exec(v []driver.Value) {
 	// However, if it's an error, we wait until ReadyForQuery and then return
 	// the error to our caller.
 workaround:
+
 	for {
 		t, r := st.cn.recv1()
 		switch t {
-		case 'E':
+		case message.Error:
 			err = parseError(r)
-		case 'C', 'D':
+		case message.CommandComplete, message.DataRow:
 			// the query didn't fail, but we can't process this message
 			st.cn.saveMessageType = t
 			st.cn.saveMessageBuffer = r
+			//st.cn.saveMessageBuffer = r.copy()
 			return
-		case 'Z':
+		case message.ReadyForQuery:
 			if err == nil {
 				errorf("unexpected ReadyForQuery during extended query execution")
 			}
@@ -216,7 +217,6 @@ func (st *stmt) NumInput() int {
 // command tag could not be parsed, parseComplete panics.
 func parseComplete(commandTag string) (int64, string) {
 
-	log.Printf("parseComplete(%s)", commandTag)
 	commandsWithAffectedRows := []string{
 		"SELECT ",
 		// INSERT is handled below
@@ -368,18 +368,18 @@ func (rs *rows) Next(dest []driver.Value) (err error) {
 	for {
 		t, r := conn.recv1()
 		switch t {
-		case m_error:
+		case message.Error:
 			err = parseError(r)
-		case m_commandComplete, m_parameterStatus, m_notice:
+		case message.CommandComplete, message.ParameterStatus, message.Notice:
 			continue
-		case m_readyForQuery:
+		case message.ReadyForQuery:
 			conn.processReadyForQuery(r)
 			rs.done = true
 			if err != nil {
 				return err
 			}
 			return io.EOF
-		case m_dataRow:
+		case message.DataRow:
 			rs.st.parseDataRow(r, dest)
 			return
 		default:

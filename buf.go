@@ -8,6 +8,14 @@ import (
 
 type readBuf []byte
 
+func (b *readBuf) copy() *readBuf {
+	asBytes := []byte(*b)
+	dest := make([]byte, len(asBytes), cap(asBytes))
+	copy(dest, asBytes)
+	asBuf := readBuf(dest)
+	return &asBuf
+}
+
 func (b *readBuf) int32() (n int) {
 	n = int(int32(binary.BigEndian.Uint32(*b)))
 	*b = (*b)[4:]
