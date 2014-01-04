@@ -361,6 +361,14 @@ type NullTime struct {
 	Valid bool // Valid is true if Time is not NULL
 }
 
+// Creates a new valid NullTime, containing the current time
+func NullTimeNow() NullTime {
+	return NullTime{
+		Time: time.Now(),
+		Valid: true,
+	}
+}
+
 // Scan implements the driver.Scanner interface.
 func (nt *NullTime) Scan(value interface{}) error {
 	nt.Time, nt.Valid = value.(time.Time)
