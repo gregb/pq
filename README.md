@@ -61,6 +61,7 @@ code still exists in here.
 * Ewan Chou (coocood)
 * Federico Romero (federomero)
 * Gary Burd (garyburd)
+* Greg Bodi (gregb)
 * Heroku (heroku)
 * Jason McVetta (jmcvetta)
 * Jeremy Jay (pbnjay)
