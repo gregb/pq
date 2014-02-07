@@ -28,7 +28,7 @@ var (
 	ErrInFailedTransaction = errors.New("pq: Could not complete operation in a failed transaction")
 )
 
-var trafficLogging bool = false
+var TrafficLogging bool = false
 
 type drv struct{}
 
@@ -459,7 +459,7 @@ func (cn *conn) send(m *writeBuf) {
 		*m = b
 	}
 
-	if trafficLogging {
+	if TrafficLogging {
 		log.Printf("Sending : (%c) %q", (*m)[0], b)
 	}
 
@@ -478,7 +478,7 @@ func (cn *conn) recvMessage() (message.Backend, *readBuf, error) {
 		cn.saveMessageType = 0
 		cn.saveMessageBuffer = nil
 
-		if trafficLogging {
+		if TrafficLogging {
 			log.Printf("Returning worked-around saved message: (%c) %q", t, (*r))
 		}
 
@@ -494,7 +494,7 @@ func (cn *conn) recvMessage() (message.Backend, *readBuf, error) {
 
 	b := readBuf(x[1:])
 
-	if trafficLogging {
+	if TrafficLogging {
 		log.Printf("Received: (%c) %q", t, b)
 	}
 
@@ -692,7 +692,7 @@ func (c *conn) processParameterStatus(r *readBuf) {
 			c.parameterStatus.currentLocation = nil
 		}
 	default:
-		if trafficLogging {
+		if TrafficLogging {
 			val := r.string()
 			log.Printf("Unhandled parameter status: %s = %s", param, val)
 		}
