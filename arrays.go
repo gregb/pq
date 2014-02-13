@@ -36,11 +36,11 @@ func (c *arrayConverter) decode(s []byte) (interface{}, error) {
 	}
 
 	if s[0] != '{' {
-		return nil, fmt.Errorf("Malformed array string: Should start with '{', but found %s instead", s[0])
+		return nil, fmt.Errorf("Malformed array string: Should start with '{', but found %s instead", string(s[0]))
 	}
 
 	if s[length-1] != '}' {
-		return nil, fmt.Errorf("Malformed array string: Should end with '}', but found %s instead", s[length-1])
+		return nil, fmt.Errorf("Malformed array string: Should end with '}', but found %s instead", string(s[length-1]))
 	}
 
 	// get the element type for this array type, and it's delimiter

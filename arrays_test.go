@@ -174,7 +174,7 @@ func TestStringArrayRoundtrip(t *testing.T) {
 
 	for i, v := range gotArray {
 		if v != expectedArray[i] {
-			t.Errorf("Error in element %d; expected %d, got %d", i, expectedArray[i], v)
+			t.Errorf("Error in element %d; expected %s, got %s", i, expectedArray[i], v)
 		}
 	}
 }
