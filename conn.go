@@ -494,9 +494,7 @@ func (cn *conn) recvMessage() (message.Backend, *readBuf, error) {
 
 	b := readBuf(x[1:])
 
-	if TrafficLogging {
-		log.Printf("Received: (%c) %q", t, b)
-	}
+
 
 	n := b.int32() - 4
 	var y []byte
@@ -509,6 +507,11 @@ func (cn *conn) recvMessage() (message.Backend, *readBuf, error) {
 	if err != nil {
 		return 0, nil, err
 	}
+
+	if TrafficLogging {
+		log.Printf("Received: (%c) [%d] %q", t, n, y)
+	}
+
 	return t, (*readBuf)(&y), nil
 }
 
